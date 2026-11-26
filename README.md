@@ -48,7 +48,7 @@ model here.
 
 Done: shared backend, family voices, music links, who-sent-it labels on photos,
 the new photo-and-faces look, the growing flower and garden, Mom can reply
-(hearts, voice messages, seen/read), the pairing security fixes, and
+(hearts, voice messages, seen/read), the pairing security fixes,
 picture-frame mode (photos, garden, night clock), and evening calm mode.
 
 1. **Life story** and "On this day."
