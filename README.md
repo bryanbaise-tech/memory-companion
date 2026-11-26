@@ -52,7 +52,12 @@ the new photo-and-faces look, the growing flower and garden, Mom can reply
 picture-frame mode (photos, garden, night clock), evening calm mode, and
 the life story with "On this day".
 
-1. **Native iPhone milestone**, done as one piece:
+**iPhone app (started):** `ios/` holds a native shell that builds and runs in the Simulator.
+It loads the live site and adds reminders scheduled on the phone (they fire even when the app
+is closed), keep-awake for the picture frame, sound with the silent switch on, and email
+sign-in links that reopen the app. Account deletion is in Settings. See CLAUDE.md to build.
+
+1. **Native iPhone milestone**, remaining pieces (need the paid Apple Developer Program):
    - a Swift app that wraps the web app, with the web files bundled inside so it opens offline
    - real notifications, including "Mom missed her pills" alerts to family and
      a happy "Mom's flower bloomed today 🌸" note
