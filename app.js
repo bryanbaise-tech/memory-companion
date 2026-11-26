@@ -88,6 +88,7 @@ function listenLive() {
 // Re-render for live changes, but never while someone is typing in a form.
 let pendingRender = false;
 function softRender() {
+  if ($app.querySelector('.player iframe')) { pendingRender = true; return; } // a song is playing
   const a = document.activeElement;
   if (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && a.closest('#app')) { pendingRender = true; return; }
   clearTimeout(softRender.t);
@@ -896,14 +897,58 @@ async function viewCalendar() {
   return topbar('Calendar') + html;
 }
 
+// ---- Music links from YouTube, Spotify and Apple Music ----
+// YouTube plays full songs inside the app. Spotify and Apple Music only allow
+// 30-second previews on web pages, so they also get an "open the app" button.
+function parseMusicLink(raw) {
+  let u;
+  const s = String(raw || '').trim();
+  const sp = s.match(/^spotify:(track|album|playlist|artist|episode|show):([A-Za-z0-9]+)/);
+  if (sp) return { provider: 'spotify', embed: `https://open.spotify.com/embed/${sp[1]}/${sp[2]}`, open: `https://open.spotify.com/${sp[1]}/${sp[2]}`, url: `https://open.spotify.com/${sp[1]}/${sp[2]}`, tall: sp[1] !== 'track' };
+  try { u = new URL(s); } catch { return null; }
+  const host = u.hostname.replace(/^www\.|^m\./, '');
+  if (host === 'youtu.be' || host === 'youtube.com' || host === 'music.youtube.com') {
+    const list = u.searchParams.get('list');
+    let vid = host === 'youtu.be' ? u.pathname.slice(1) : u.searchParams.get('v');
+    const m = u.pathname.match(/^\/(?:shorts|embed|live)\/([\w-]{6,})/);
+    if (m) vid = m[1];
+    vid = (vid || '').split('/')[0];
+    if (vid && /^[\w-]{6,}$/.test(vid)) return { provider: 'youtube', embed: `https://www.youtube-nocookie.com/embed/${vid}?rel=0&playsinline=1${list ? '&list=' + encodeURIComponent(list) : ''}`, open: `https://www.youtube.com/watch?v=${vid}`, url: u.href };
+    if (list) return { provider: 'youtube', embed: `https://www.youtube-nocookie.com/embed/videoseries?list=${encodeURIComponent(list)}&rel=0&playsinline=1`, open: `https://www.youtube.com/playlist?list=${encodeURIComponent(list)}`, url: u.href };
+    return null;
+  }
+  if (host === 'open.spotify.com') {
+    const m = u.pathname.match(/^\/(?:intl-[\w-]+\/)?(track|album|playlist|artist|episode|show)\/([A-Za-z0-9]+)/);
+    if (m) return { provider: 'spotify', embed: `https://open.spotify.com/embed/${m[1]}/${m[2]}`, open: `https://open.spotify.com/${m[1]}/${m[2]}`, url: u.href, tall: m[1] !== 'track' };
+    return null;
+  }
+  if (host === 'music.apple.com' || host === 'embed.music.apple.com') {
+    if (!/\/(album|playlist|song|station|music-video)\//.test(u.pathname)) return null;
+    const isSong = u.searchParams.has('i') || /\/song\//.test(u.pathname);
+    return { provider: 'apple', embed: `https://embed.music.apple.com${u.pathname}${u.search}`, open: `https://music.apple.com${u.pathname}${u.search}`, url: u.href, tall: !isSong };
+  }
+  return null;
+}
+const SERVICE = { youtube: 'YouTube', spotify: 'Spotify', apple: 'Apple Music' };
+
 let nowPlaying = null; // { id, audio }
 function stopMusic() {
   if (nowPlaying) { nowPlaying.audio.pause(); nowPlaying = null; }
 }
-async function viewMusic() {
+async function viewMusic(id) {
+  const links = (await all('music')).sort((a, b) => (a.title || '').localeCompare(b.title || ''));
+  if (id) return viewMusicPlayer(links.find((m) => m.id === id));
   const list = await songs();
-  if (!list.length) return topbar('Music') + empty('music', 'No songs yet.', 'Your family can add favorite songs in Family settings.');
-  return topbar('Music') + list.map((s) => {
+  if (!list.length && !links.length) return topbar('Music') + empty('music', 'No songs yet.', 'Your family can add favorite songs in Family settings.');
+  const linkCards = links.map((m) => `
+    <a class="paper song-link" href="#music/${m.id}">
+      <span class="cover">${m.thumb ? `<img src="${esc(m.thumb)}" alt="" loading="lazy">` : icon('music')}</span>
+      <span class="song-body"><span class="song-title">${esc(m.title || 'Song')}</span>
+        ${m.artist ? `<span class="song-artist">${esc(m.artist)}</span>` : ''}
+        <span class="svc svc-${m.provider}">${SERVICE[m.provider] || ''}</span></span>
+      <span class="play-pill">${icon('play')} Play</span>
+    </a>`).join('');
+  return topbar('Music') + linkCards + list.map((s) => {
     const playing = nowPlaying && nowPlaying.id === s.id && !nowPlaying.audio.paused;
     return `<div class="paper song">
       <span class="song-ic">${icon('music')}</span>
@@ -911,6 +956,27 @@ async function viewMusic() {
       <button class="btn primary big song-btn" data-action="song" data-id="${s.id}">${playing ? `${icon('pause')} Pause` : `${icon('play')} Play`}</button>
     </div>`;
   }).join('');
+}
+
+function viewMusicPlayer(m) {
+  if (!m) return topbar('Music', '#music', 'Music') + empty('music', 'That song is no longer here.');
+  const p = parseMusicLink(m.url) || m;
+  const height = p.provider === 'youtube' ? null : p.provider === 'spotify' ? (p.tall ? 452 : 352) : (p.tall ? 450 : 175);
+  const appName = SERVICE[p.provider];
+  return topbar('', '#music', 'All music') + `
+    <div class="player">
+      <h1 class="player-title">${esc(m.title || 'Song')}</h1>
+      ${m.artist ? `<div class="song-artist big">${esc(m.artist)}</div>` : ''}
+      <div class="embed ${p.provider === 'youtube' ? 'embed-video' : ''}" ${height ? `style="height:${height}px"` : ''}>
+        <iframe src="${esc(p.embed)}" title="${esc(m.title || 'Music player')}" loading="eager"
+          allow="autoplay; encrypted-media; clipboard-write; fullscreen; picture-in-picture" allowfullscreen></iframe>
+      </div>
+      <p class="player-hint">${p.provider === 'youtube' ? 'Tap the picture to play.' : `Tap play for a short preview, or play the whole song in the ${appName} app.`}</p>
+      <div class="btn-row">
+        ${p.provider !== 'youtube' ? `<a class="btn primary big" href="${esc(p.open)}" target="_blank" rel="noopener">${icon('play')} Play full song in ${appName}</a>` : ''}
+        ${speakBtn(`${m.title || 'This song'}${m.artist ? ', by ' + m.artist : ''}.`, 'What song is this?')}
+      </div>
+    </div>`;
 }
 
 function viewAbout() {
@@ -1231,9 +1297,30 @@ async function carePhotos() {
 
 async function careMusic() {
   const list = await songs();
+  const links = (await all('music')).sort((a, b) => b.at - a.at);
   return `
+    <form class="paper stack" data-form="music-link-add">
+      <h2>Add from Spotify, Apple Music or YouTube</h2>
+      <label>Paste a link to a song, album or playlist
+        <input type="url" name="url" required placeholder="https://open.spotify.com/track/…" inputmode="url"></label>
+      <label>Name it <span class="hint">(optional — we'll look up the song name and cover)</span>
+        <input type="text" name="title" maxlength="120" placeholder="e.g. Mom's favorite: Moon River"></label>
+      <button class="btn primary" type="submit">Add song</button>
+      <details class="how"><summary>How do I get a link?</summary>
+        <p><b>Spotify:</b> tap ••• on a song → Share → Copy link.</p>
+        <p><b>Apple Music:</b> tap ••• → Share → Copy.</p>
+        <p><b>YouTube:</b> tap Share under the video → Copy link.</p>
+        <p class="hint">YouTube plays the whole song right in the app. Spotify and Apple Music play a 30-second preview in the app, plus a button that opens their app for the full song (needs a subscription on that phone).</p>
+      </details>
+    </form>
+    ${links.length ? `<div class="paper"><h2>Music links (${links.length})</h2>
+      ${links.map((m) => `<div class="list-item">
+        ${m.thumb ? `<img class="mini-thumb" src="${esc(m.thumb)}" alt="">` : ''}
+        <span style="flex:1;min-width:0"><strong>${esc(m.title || 'Song')}</strong><br><span class="meta">${SERVICE[m.provider] || ''}${m.artist ? ' · ' + esc(m.artist) : ''}</span></span>
+        <button class="btn small danger" data-action="music-del" data-id="${m.id}">Remove</button></div>`).join('')}
+    </div>` : ''}
     <form class="paper stack" data-form="song-add">
-      <h2>Add favorite songs</h2>
+      <h2>Or upload song files</h2>
       <label>Audio files <span class="hint">(MP3, M4A…)</span><input type="file" name="files" accept="audio/*" multiple required></label>
       <p class="hint">Music they loved when they were young can be very calming. Song names come from the file names — you can edit them below.</p>
       <button class="btn primary" type="submit">Add songs</button>
@@ -1510,6 +1597,7 @@ document.addEventListener('click', async (e) => {
       if (m?.photoId) { await del('media', m.photoId); forgetUrl(m.photoId); }
       await del('meds', id); render();
     } break;
+    case 'music-del': if (confirm('Remove this song?')) { await del('music', id); render(); } break;
     case 'event-del': if (confirm('Remove this event?')) { await del('events', id); render(); } break;
     case 'msg-del': if (confirm('Delete this message?')) { await del('messages', id); render(); } break;
     case 'media-del':
@@ -1679,6 +1767,25 @@ document.addEventListener('submit', async (e) => {
         const files = fd.getAll('files').filter((f) => f.size);
         for (const f of files) await saveMedia(f, val(fd, 'caption'));
         toast(`Added ${files.length} item${files.length === 1 ? '' : 's'}`); render();
+        break;
+      }
+      case 'music-link-add': {
+        const link = parseMusicLink(val(fd, 'url'));
+        if (!link) { toast('Please paste a Spotify, Apple Music or YouTube link'); break; }
+        toast('Looking up the song…');
+        let info = {};
+        try {
+          const r = await fetch(`${SUPABASE_URL}/functions/v1/linkinfo`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json', ...(await authHeaders()) }, body: JSON.stringify({ url: link.url }),
+          });
+          info = await r.json();
+          if (!r.ok) { toast(info.error || "Couldn't look that up"); if (!val(fd, 'title')) break; info = {}; }
+        } catch { info = {}; }
+        await put('music', {
+          id: uid(), provider: link.provider, url: link.url, embed: link.embed, open: link.open, tall: !!link.tall,
+          title: val(fd, 'title') || info.title || 'Song', artist: info.artist || '', thumb: info.thumb || '', at: Date.now(),
+        });
+        toast('Song added'); render();
         break;
       }
       case 'song-add': {

@@ -433,3 +433,24 @@ textarea { min-height: 6rem; resize: vertical; }
 .qr img, .qr canvas { display: block; width: 100% !important; height: auto !important; }
 .send-row { margin-top: .5rem; }
 .ready-text { font-size: 1.25rem; font-family: var(--serif); font-weight: 700; }
+
+/* ---------- Music links ---------- */
+.song-link { display: flex; align-items: center; gap: .9rem; margin-top: 0 !important; }
+.cover { width: 4.4rem; height: 4.4rem; border-radius: 12px; overflow: hidden; flex: none; background: var(--sakura-soft); color: var(--sakura); display: grid; place-items: center; }
+.cover img { width: 100%; height: 100%; object-fit: cover; }
+.cover .ic { width: 1.6rem; height: 1.6rem; }
+.song-body { flex: 1; min-width: 0; display: grid; gap: .1rem; }
+.song-body .song-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.song-artist { color: var(--muted); font-size: .95rem; }
+.song-artist.big { font-size: 1.15rem; margin-bottom: .8rem; }
+.svc { font-size: .75rem; font-weight: 700; letter-spacing: .04em; }
+.svc-youtube { color: #c4302b; } .svc-spotify { color: #1a8a47; } .svc-apple { color: #d6374f; }
+.play-pill { flex: none; display: inline-flex; align-items: center; gap: .35rem; background: var(--ai); color: #fff; border-radius: 999px; padding: .55rem 1rem; font-weight: 700; }
+.player-title { font-size: 1.8rem; margin-bottom: .2rem; }
+.embed { width: 100%; border-radius: 16px; overflow: hidden; background: var(--card); box-shadow: var(--shadow); margin-top: .6rem; }
+.embed iframe { width: 100%; height: 100%; border: 0; display: block; }
+.embed-video { aspect-ratio: 16 / 9; height: auto; }
+.player-hint { color: var(--muted); margin: .8rem 0 0; }
+details.how { background: var(--paper); border-radius: 12px; padding: .7rem .9rem; }
+details.how summary { cursor: pointer; font-weight: 700; }
+details.how p { margin: .5rem 0 0; font-size: .92rem; }
