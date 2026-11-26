@@ -454,3 +454,12 @@ textarea { min-height: 6rem; resize: vertical; }
 details.how { background: var(--paper); border-radius: 12px; padding: .7rem .9rem; }
 details.how summary { cursor: pointer; font-weight: 700; }
 details.how p { margin: .5rem 0 0; font-size: .92rem; }
+
+/* ---------- Family voices ---------- */
+.voice-script { background: var(--paper); border-radius: 14px; padding: .4rem 1rem; max-height: 22rem; overflow-y: auto; margin: .6rem 0; }
+.voice-script p { font-family: var(--serif); font-size: 1.12rem; line-height: 1.7; margin: .8rem 0; }
+.vs-num { display: inline-block; min-width: 1.6rem; color: var(--shu); font-weight: 800; }
+.rec-bar { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; margin: .6rem 0; }
+.rec-time { font-family: var(--serif); font-size: 1.3rem; font-weight: 700; color: var(--shu); }
+#rec-preview audio { width: 100%; margin-top: .4rem; }
+.consent-check { font-weight: 500; font-size: .95rem; align-items: flex-start; }

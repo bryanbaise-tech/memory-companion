@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Record Your Voice</title>
+  <meta name="description" content="A two-minute script to record your voice for a loved one's Memory Companion.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Shippori+Mincho:wght@600;700;800&family=Zen+Maru+Gothic:wght@500;700&display=swap">
+  <style>
+    :root {
+      --paper: #f4eee3; --card: #fbf8f2; --ink: #2b2925; --muted: #6b655b; --line: #e2d8c6;
+      --ai: #2d4a6a; --shu: #c0432b; --matcha: #5f7f3f; --kin-soft: #f3e8cf;
+      --serif: "Shippori Mincho", Georgia, serif;
+      --sans: "Zen Maru Gothic", ui-rounded, system-ui, -apple-system, sans-serif;
+      color-scheme: light;
+    }
+    * { box-sizing: border-box; }
+    html { font-size: 19px; -webkit-text-size-adjust: 100%; }
+    body { margin: 0; background: var(--paper); color: var(--ink); font-family: var(--sans); font-weight: 500; line-height: 1.55; }
+    main { max-width: 680px; margin: 0 auto; padding: max(20px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) 60px max(16px, env(safe-area-inset-left)); }
+    h1, h2 { font-family: var(--serif); line-height: 1.2; margin: 0 0 .5rem; text-wrap: balance; }
+    h1 { font-size: 2rem; }
+    h2 { font-size: 1.25rem; }
+    .kicker { font-size: .78rem; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--shu); }
+    .card { background: var(--card); border-radius: 18px; padding: 1.2rem 1.3rem; margin: 1rem 0; box-shadow: 0 8px 24px -16px rgba(43,41,37,.35); }
+    .tips { display: grid; gap: .55rem; padding: 0; margin: .4rem 0 0; list-style: none; }
+    .tips li { padding-left: 1.6rem; position: relative; }
+    .tips li::before { content: ""; position: absolute; left: .3rem; top: .62rem; width: .5rem; height: .5rem; border-radius: 50%; background: var(--matcha); }
+    .names { display: grid; grid-template-columns: 1fr 1fr; gap: .7rem; }
+    @media (max-width: 480px) { .names { grid-template-columns: 1fr; } }
+    label { display: grid; gap: .25rem; font-weight: 700; font-size: .85rem; }
+    input { font: inherit; width: 100%; padding: .6rem .8rem; border: 1.5px solid var(--line); border-radius: 12px; background: #fff; }
+    .script p { font-family: var(--serif); font-size: 1.3rem; line-height: 1.75; margin: 0; }
+    .para { display: grid; grid-template-columns: 2rem 1fr; gap: .6rem; padding: 1rem 0; border-top: 1px solid var(--line); }
+    .para:first-child { border-top: 0; padding-top: .2rem; }
+    .num { font-family: var(--serif); font-weight: 800; color: var(--shu); font-size: 1.1rem; padding-top: .25rem; }
+    .pause { color: var(--muted); font-size: .85rem; font-style: italic; margin-top: .3rem; }
+    .consent { background: var(--kin-soft); }
+    .send { display: grid; gap: .4rem; }
+    a { color: var(--ai); }
+  </style>
+</head>
+<body>
+<main>
+  <div class="kicker">Memory Companion</div>
+  <h1>Record your voice</h1>
+  <p>Your voice can read reminders, messages and "the day" to <b class="loved">your loved one</b>, so they hear someone they know instead of a stranger. It takes about <b>two minutes</b>.</p>
+
+  <div class="card">
+    <h2>Fill in the names</h2>
+    <div class="names">
+      <label>Your name <input id="reader" placeholder="e.g. Sarah" autocomplete="given-name"></label>
+      <label>Who it's for <input id="loved" placeholder="e.g. Mom"></label>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Before you start</h2>
+    <ul class="tips">
+      <li><b>Find a quiet room</b> with soft things around (a bedroom or closet is great). No TV, music, fans or dishwasher.</li>
+      <li><b>Use your phone's voice recorder</b> (Voice Memos on iPhone, Recorder on Android). Hold it about a hand's width from your mouth.</li>
+      <li><b>Talk the way you'd talk to them</b>: warm, calm and a little slower than usual. Smiling helps.</li>
+      <li><b>Record it in one go.</b> If you stumble, pause, then just repeat the sentence and keep going.</li>
+      <li>Leave a short pause between paragraphs. Aim for <b>1½ to 3 minutes</b> in total.</li>
+    </ul>
+  </div>
+
+  <div class="card script">
+    <div class="para consent">
+      <div class="num">0</div>
+      <div><p>My name is <span class="reader">[your name]</span>. I'm recording my voice for Memory Companion, so it can read messages and reminders to <span class="loved">[their name]</span>. I give my permission for my voice to be used this way.</p></div>
+    </div>
+    <div class="para"><div class="num">1</div><div>
+      <p>Good morning, <span class="loved">[their name]</span>. It's Tuesday, the fourteenth of March, and it's a little after eight o'clock. The sun is up, and it looks like a lovely day outside. Take your time getting ready. There's no rush at all.</p>
+      <div class="pause">pause</div></div></div>
+    <div class="para"><div class="num">2</div><div>
+      <p>It's time to take your morning pills. They're in the little white box on the kitchen counter, next to the kettle. Have a glass of water with them, and then you can sit down and enjoy your breakfast.</p>
+      <div class="pause">pause</div></div></div>
+    <div class="para"><div class="num">3</div><div>
+      <p>This afternoon, at two thirty, Sarah is coming to visit. She'll bring the photos from Emma's graduation. Do you remember? Emma wore the blue dress, and everyone was so proud of her.</p>
+      <div class="pause">pause</div></div></div>
+    <div class="para"><div class="num">4</div><div>
+      <p>Here's a message from me. I love you so much, and I'm thinking about you today. I'll call you this evening, around six o'clock. If you need anything at all, just press the big button that says "I need help," and someone will be right there.</p>
+      <div class="pause">pause</div></div></div>
+    <div class="para"><div class="num">5</div><div>
+      <p>Don't forget to drink some water. It's warm today, about seventy-five degrees, so a light sweater is all you need if you go out for a walk. Would you like to listen to some music? Let's put on your favorite song.</p>
+      <div class="pause">pause</div></div></div>
+    <div class="para"><div class="num">6</div><div>
+      <p>Is that you on the phone? Oh, how wonderful! Let's look at the pictures together. One, two, three. Here we go. Look at that big smile!</p>
+      <div class="pause">pause</div></div></div>
+    <div class="para"><div class="num">7</div><div>
+      <p>You did a wonderful job today. You took your medicine, you ate a good lunch, and you went for a walk in the garden. Now it's time to rest. Sleep well, and I'll see you in the morning. Goodnight.</p></div></div>
+  </div>
+
+  <div class="card send">
+    <h2>When you're done</h2>
+    <p><b>Send the recording</b> back to the person who sent you this page (by text or email is fine), and they'll add it.</p>
+    <p>Already part of the family circle in the app? You can record right there instead: <b>Family tools → Voices → Record my voice</b>.</p>
+    <p style="color:var(--muted);font-size:.85rem">Your recording is only used to create a voice for this one family's companion. It can be removed at any time.</p>
+  </div>
+</main>
+<script>
+  // Names come from the link (?for=Mom&name=Sarah) or what you type; they fill the script.
+  const q = new URLSearchParams(location.search);
+  const reader = document.getElementById('reader');
+  const loved = document.getElementById('loved');
+  reader.value = q.get('name') || '';
+  loved.value = q.get('for') || '';
+  function fill() {
+    document.querySelectorAll('.reader').forEach((el) => { el.textContent = reader.value.trim() || '[your name]'; });
+    document.querySelectorAll('.loved').forEach((el) => { el.textContent = loved.value.trim() || (el.tagName === 'B' ? 'your loved one' : '[their name]'); });
+  }
+  reader.addEventListener('input', fill);
+  loved.addEventListener('input', fill);
+  fill();
+</script>
+</body>
+</html>

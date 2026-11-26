@@ -89,6 +89,7 @@ function listenLive() {
 let pendingRender = false;
 function softRender() {
   if ($app.querySelector('.player iframe')) { pendingRender = true; return; } // a song is playing
+  if (typeof rec !== 'undefined' && (rec.recorder || rec.blob)) { pendingRender = true; return; } // recording in progress
   const a = document.activeElement;
   if (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && a.closest('#app')) { pendingRender = true; return; }
   clearTimeout(softRender.t);
@@ -315,6 +316,22 @@ function speak(text, opts = {}) {
   speakDevice(text, opts);
 }
 
+// Who reads what: "day", "reminder", "message", "other". A voice can be the warm narrator,
+// a recorded family voice, or "rotate" (family voices take turns, a different one each day).
+function voiceFor(purpose = 'other', opts = {}) {
+  const n = settings.narration || {};
+  const familyVoices = [...storeOf('voices').keys()];
+  const known = (v) => v && (v === settings.elevenVoiceId || storeOf('voices').has(v));
+  if (opts.senderVoice && known(opts.senderVoice)) return opts.senderVoice;
+  let v = n[purpose] || n.other || settings.elevenVoiceId;
+  if (v === 'rotate') {
+    if (!familyVoices.length) return settings.elevenVoiceId;
+    const day = Math.floor((Date.now() - new Date().getTimezoneOffset() * 60000) / 86400000);
+    v = familyVoices.sort()[day % familyVoices.length];
+  }
+  return known(v) ? v : settings.elevenVoiceId;
+}
+
 async function speakEleven(text, opts = {}) {
   stopSpeaking();
   const token = speakToken;
@@ -324,7 +341,7 @@ async function speakEleven(text, opts = {}) {
     const r = await fetch(VOICE_FN, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
-      body: JSON.stringify({ text, voiceId: opts.elevenVoiceId || settings.elevenVoiceId, speed: opts.speed || elevenSpeed() }),
+      body: JSON.stringify({ text, voiceId: opts.elevenVoiceId || voiceFor(opts.purpose, opts), speed: opts.speed || elevenSpeed() }),
     });
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `Voice server said ${r.status}`);
     const url = URL.createObjectURL(await r.blob());
@@ -560,8 +577,8 @@ const topbar = (title, back = '#home', backLabel = 'Home') => `
     <a class="btn home-btn" href="${back}">${icon(back === '#home' ? 'home' : 'back')} ${esc(backLabel)}</a>
     <h1>${esc(title)}</h1>
   </div>`;
-const speakBtn = (text, label = 'Read to me') =>
-  `<button class="btn" data-action="speak" data-text="${esc(text)}">${icon('speak')} ${esc(label)}</button>`;
+const speakBtn = (text, label = 'Read to me', o = {}) =>
+  `<button class="btn" data-action="speak" data-text="${esc(text)}"${o.purpose ? ` data-purpose="${esc(o.purpose)}"` : ''}${o.voice ? ` data-voice="${esc(o.voice)}"` : ''}>${icon('speak')} ${esc(label)}</button>`;
 const empty = (ic, text, hint = '') =>
   `<div class="empty"><div class="empty-ic">${icon(ic)}</div><p>${esc(text)}</p>${hint ? `<p class="hint">${esc(hint)}</p>` : ''}</div>`;
 const avatar = (url, name) => `<div class="avatar">${url ? `<img src="${url}" alt="">` : esc((name || '?').trim()[0] || '?')}</div>`;
@@ -659,7 +676,7 @@ async function viewHome() {
         <div class="date">${esc(dateText)}</div>
         <div class="clock" data-clock>${fmtClock(now)}</div>
         <div class="greet">${esc(greet)}</div>
-        <button class="hero-speak" data-action="speak" data-text="${esc(sayDay)}">${icon('speak')} Read me the day</button>
+        <button class="hero-speak" data-action="speak" data-purpose="day" data-text="${esc(sayDay)}">${icon('speak')} Read me the day</button>
       </div>
     </header>
 
@@ -775,7 +792,7 @@ async function viewMessage(id) {
       <div class="msg-when">${fmtWhen(m.at)}</div>
       <div class="letter-text">${esc(m.text)}</div>
       ${mediaHtml}
-      <div class="btn-row">${speakBtn(`Message from ${m.from}. ${m.text}`)}</div>
+      <div class="btn-row">${speakBtn(m.voiceId && storeOf('voices').has(m.voiceId) ? m.text : `Message from ${m.from}. ${m.text}`, 'Read to me', { purpose: 'message', voice: m.voiceId })}</div>
     </article>
     <div class="paper">
       <div class="section-label">Send a reply</div>
@@ -1023,7 +1040,7 @@ async function viewHelp() {
 
 // ================================================================ family (caregiver) mode
 const CARE_TABS = [
-  ['activity', 'Today'], ['circle', 'Family & devices'], ['messages', 'Send message'], ['photos', 'Photos & videos'],
+  ['activity', 'Today'], ['circle', 'Family & devices'], ['messages', 'Send message'], ['photos', 'Photos & videos'], ['voices', 'Voices'],
   ['tasks', 'Daily tasks'], ['meds', 'Medicines'], ['calendar', 'Calendar'], ['music', 'Music'],
   ['people', 'People'], ['about', 'About & help'], ['settings', 'Settings'],
 ];
@@ -1047,7 +1064,7 @@ async function viewCare(tab = 'activity') {
         <button class="btn small" data-action="care-lock">Lock &amp; return</button></div>`;
   const views = {
     activity: careActivity, tasks: careTasks, meds: careMeds, calendar: careCalendar, messages: careMessages,
-    photos: carePhotos, music: careMusic, people: carePeople, about: careAbout, circle: careCircle, settings: careSettings,
+    photos: carePhotos, voices: careVoices, music: careMusic, people: carePeople, about: careAbout, circle: careCircle, settings: careSettings,
   };
   return banner + tabs + await (views[tab] || careActivity)();
 }
@@ -1136,6 +1153,139 @@ async function careCircle() {
       <p class="hint">${myRole === 'family' ? `Signed in as ${esc(me.email || '')}.` : `This is ${esc(settings.name || 'your loved one')}'s paired device.`}</p>
       <button class="btn small" data-action="sign-out">${myRole === 'family' ? 'Sign out' : 'Unpair this device'}</button>
     </div>`;
+}
+
+// ---- Family voices ----
+const VOICE_SCRIPT = [
+  (r, l) => `My name is ${r}. I'm recording my voice for Memory Companion, so it can read messages and reminders to ${l}. I give my permission for my voice to be used this way.`,
+  (r, l) => `Good morning, ${l}. It's Tuesday, the fourteenth of March, and it's a little after eight o'clock. The sun is up, and it looks like a lovely day outside. Take your time getting ready. There's no rush at all.`,
+  () => `It's time to take your morning pills. They're in the little white box on the kitchen counter, next to the kettle. Have a glass of water with them, and then you can sit down and enjoy your breakfast.`,
+  () => `This afternoon, at two thirty, Sarah is coming to visit. She'll bring the photos from Emma's graduation. Do you remember? Emma wore the blue dress, and everyone was so proud of her.`,
+  () => `Here's a message from me. I love you so much, and I'm thinking about you today. I'll call you this evening, around six o'clock. If you need anything at all, just press the big button that says "I need help," and someone will be right there.`,
+  () => `Don't forget to drink some water. It's warm today, about seventy-five degrees, so a light sweater is all you need if you go out for a walk. Would you like to listen to some music? Let's put on your favorite song.`,
+  () => `Is that you on the phone? Oh, how wonderful! Let's look at the pictures together. One, two, three. Here we go. Look at that big smile!`,
+  () => `You did a wonderful job today. You took your medicine, you ate a good lunch, and you went for a walk in the garden. Now it's time to rest. Sleep well, and I'll see you in the morning. Goodnight.`,
+];
+const rec = { recorder: null, chunks: [], blob: null, url: '', started: 0, timer: null, stream: null };
+
+function shareButtons(url, text, subject) {
+  return `
+    <div class="btn-row send-row">
+      ${navigator.share ? `<button class="btn primary" data-action="share-link" data-url="${esc(url)}" data-text="${esc(text)}">${icon('msg')} Send…</button>` : ''}
+      <a class="btn ${navigator.share ? '' : 'primary'}" href="sms:?&body=${encodeURIComponent(text + ' ' + url)}">${icon('msg')} Text message</a>
+      <a class="btn" href="mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(text + '\n\n' + url)}">Email</a>
+      <button class="btn" data-action="copy-link" data-url="${esc(url)}">Copy link</button>
+    </div>`;
+}
+
+async function careVoices() {
+  const voices = [...storeOf('voices').values()].sort((a, b) => a.name.localeCompare(b.name));
+  const n = settings.narration || {};
+  const loved = settings.name || 'your loved one';
+  const base = location.origin + location.pathname.replace(/[^/]*$/, '');
+  const scriptUrl = `${base}record.html?for=${encodeURIComponent(settings.name || '')}`;
+  const options = (sel, extra = '') => `
+    <option value="${esc(settings.elevenVoiceId)}" ${!sel || sel === settings.elevenVoiceId ? 'selected' : ''}>Brady J (warm narrator)</option>
+    ${voices.map((v) => `<option value="${esc(v.id)}" ${sel === v.id ? 'selected' : ''}>${esc(v.name)}</option>`).join('')}
+    ${voices.length > 1 ? `<option value="rotate" ${sel === 'rotate' ? 'selected' : ''}>Take turns: a different family voice each day</option>` : ''}${extra}`;
+  const canRecord = !!(navigator.mediaDevices && window.MediaRecorder);
+  const me1 = myName.split(/[\s(]/)[0] || 'me';
+  return `
+    <div class="paper">
+      <h2>Family voices</h2>
+      <p>${esc(loved)} can hear <b>your</b> voice, and your sister's, and anyone else's who records, instead of a stranger's.</p>
+      ${voices.length ? voices.map((v) => `
+        <div class="list-item"><span>🎙️ <strong>${esc(v.name)}</strong><br><span class="meta">Added ${new Date(v.at).toLocaleDateString()}</span></span>
+          <span class="row" style="flex:none;gap:.4rem">
+            <button class="btn small" data-action="voice-try" data-id="${esc(v.id)}">${icon('speak')} Listen</button>
+            ${myRole === 'family' ? `<button class="btn small danger" data-action="voice-del" data-id="${esc(v.id)}">Remove</button>` : ''}
+          </span></div>`).join('') : '<p class="hint">No family voices yet. Add the first one below.</p>'}
+    </div>
+
+    <form class="paper stack" data-form="narration-save">
+      <h2>Who reads what</h2>
+      <label>"Read me the day" <select name="day">${options(n.day)}</select></label>
+      <label>Reminders <select name="reminder">${options(n.reminder)}</select></label>
+      <label>Messages <span class="hint">(a message can also be set to its sender's voice when it's sent)</span><select name="message">${options(n.message)}</select></label>
+      <label>Everything else <select name="other">${options(n.other)}</select></label>
+      <button class="btn primary" type="submit">Save</button>
+    </form>
+
+    <form class="paper stack" data-form="voice-create">
+      <h2>Add a family voice</h2>
+      <label>Whose voice is this? <input type="text" name="name" required maxlength="40" value="${esc(myName)}" placeholder="e.g. Sarah (your daughter)"></label>
+
+      ${canRecord ? `
+      <div class="way">
+        <div class="way-title"><span class="way-num">1</span> Record it here</div>
+        <p class="hint">Find a quiet room. Read the script below out loud, warmly and a little slowly, like you're talking to ${esc(loved)}. About two minutes.</p>
+        <div class="voice-script">${VOICE_SCRIPT.map((f, i) => `<p><span class="vs-num">${i}</span>${esc(f(myName.split(' (')[0] || '[your name]', loved))}</p>`).join('')}</div>
+        <div class="rec-bar">
+          <button class="btn primary big" type="button" data-action="rec-toggle" id="rec-btn">${rec.recorder ? '■ Stop' : '● Start recording'}</button>
+          <span class="rec-time" id="rec-time">${rec.blob ? 'Recorded ✓' : '0:00'}</span>
+        </div>
+        <div id="rec-preview">${rec.url ? `<audio controls src="${rec.url}"></audio><button class="btn small ghost" type="button" data-action="rec-discard">Record again</button>` : ''}</div>
+      </div>` : ''}
+
+      <div class="way">
+        <div class="way-title"><span class="way-num">${canRecord ? '2' : '1'}</span> ${canRecord ? 'Or upload' : 'Upload'} a recording</div>
+        <p class="hint">For example, a Voice Memo someone sent you. 1 to 3 minutes of clear speech.</p>
+        <input type="file" name="files" accept="audio/*" multiple>
+      </div>
+
+      <label class="inline consent-check"><input type="checkbox" name="consent" required>
+        This is my voice, or the person agreed to have their voice used for ${esc(loved)}.</label>
+      <button class="btn primary big" type="submit">Create this voice</button>
+      <p class="hint">Uses ElevenLabs voice cloning (needs their Starter plan or higher). The recording is deleted once the voice is made.</p>
+    </form>
+
+    <div class="paper">
+      <h2>Ask someone to record</h2>
+      <p>Send them the script. They read it into their phone's voice recorder and send you the file. Then upload it above.</p>
+      ${shareButtons(scriptUrl, `Could you record your voice for ${loved}'s Memory Companion? It takes about two minutes. Here's the script and how-to:`, `Record your voice for ${loved}`)}
+      <p class="hint"><a href="${esc(scriptUrl)}" target="_blank" rel="noopener">Open the script page</a></p>
+    </div>`;
+}
+
+function stopRecTimer() { clearInterval(rec.timer); rec.timer = null; }
+async function toggleRecording() {
+  if (rec.recorder) { rec.recorder.stop(); return; }
+  try {
+    rec.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+  } catch {
+    toast('Please allow the microphone to record your voice.');
+    return;
+  }
+  const type = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm'].find((t) => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) || '';
+  rec.chunks = [];
+  rec.recorder = new MediaRecorder(rec.stream, type ? { mimeType: type } : undefined);
+  rec.recorder.ondataavailable = (e) => { if (e.data && e.data.size) rec.chunks.push(e.data); };
+  rec.recorder.onstop = () => {
+    stopRecTimer();
+    rec.stream.getTracks().forEach((t) => t.stop());
+    rec.blob = new Blob(rec.chunks, { type: rec.recorder.mimeType || type || 'audio/webm' });
+    if (rec.url) URL.revokeObjectURL(rec.url);
+    rec.url = URL.createObjectURL(rec.blob);
+    const secs = Math.round((Date.now() - rec.started) / 1000);
+    rec.recorder = null;
+    const btn = document.getElementById('rec-btn'); if (btn) btn.textContent = '● Start recording';
+    const t = document.getElementById('rec-time'); if (t) t.textContent = `Recorded ✓ (${Math.floor(secs / 60)}:${pad(secs % 60)})`;
+    const pv = document.getElementById('rec-preview');
+    if (pv) pv.innerHTML = `<audio controls src="${rec.url}"></audio><button class="btn small ghost" type="button" data-action="rec-discard">Record again</button>`;
+    if (secs < 45) toast('That was a bit short. About two minutes works best.');
+  };
+  rec.recorder.start(1000);
+  rec.started = Date.now();
+  const btn = document.getElementById('rec-btn'); if (btn) btn.textContent = '■ Stop';
+  rec.timer = setInterval(() => {
+    const s = Math.round((Date.now() - rec.started) / 1000);
+    const t = document.getElementById('rec-time'); if (t) t.textContent = `● ${Math.floor(s / 60)}:${pad(s % 60)}`;
+  }, 500);
+}
+function discardRecording() {
+  if (rec.url) URL.revokeObjectURL(rec.url);
+  rec.blob = null; rec.url = ''; rec.chunks = [];
+  render();
 }
 
 async function careActivity() {
@@ -1259,6 +1409,10 @@ async function careMessages() {
       <h2>Send a message</h2>
       <label>From <input type="text" name="from" required maxlength="40" value="${esc(myName)}" placeholder="e.g. Sarah (your daughter)"></label>
       <label>Message <textarea name="text" required maxlength="1000" placeholder="Short, warm and simple works best."></textarea></label>
+      ${storeOf('voices').size ? `<label>Read it aloud in <select name="voiceId">
+        <option value="">The usual voice (see Voices)</option>
+        ${[...storeOf('voices').values()].map((v) => `<option value="${esc(v.id)}" ${v.ownerUser === me.id ? 'selected' : ''}>${esc(v.name)}'s voice</option>`).join('')}
+      </select></label>` : ''}
       <label>Photo or video <span class="hint">(optional — it also appears in Photos)</span>
         <input type="file" name="file" accept="image/*,video/*"></label>
       <button class="btn primary" type="submit">Send</button>
@@ -1556,7 +1710,7 @@ document.addEventListener('click', async (e) => {
   if (!el) return;
   const { action, id, text } = el.dataset;
   switch (action) {
-    case 'speak': speak(text); break;
+    case 'speak': speak(text, { purpose: el.dataset.purpose || 'other', senderVoice: el.dataset.voice || undefined }); break;
     case 'test-sound': chime(); setTimeout(() => speak('Hello! You can hear me.'), 600); break;
     case 'eleven-sample': {
       const opt = document.getElementById('eleven-pick')?.selectedOptions[0];
@@ -1597,6 +1751,22 @@ document.addEventListener('click', async (e) => {
       if (m?.photoId) { await del('media', m.photoId); forgetUrl(m.photoId); }
       await del('meds', id); render();
     } break;
+    case 'rec-toggle': await toggleRecording(); break;
+    case 'rec-discard': discardRecording(); break;
+    case 'voice-try': {
+      const v = storeOf('voices').get(id);
+      speak(`Hello, ${settings.name || 'there'}. This is ${v ? v.name.split(' (')[0] : 'me'}. I love you, and I'm thinking about you today.`, { elevenVoiceId: id });
+      break;
+    }
+    case 'voice-del':
+      if (confirm('Remove this voice? Anything set to use it will go back to the warm narrator.')) {
+        try {
+          const r = await fetch(`${SUPABASE_URL}/functions/v1/voiceclone`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(await authHeaders()) }, body: JSON.stringify({ action: 'delete', circleId, voiceId: id }) });
+          if (!r.ok) throw new Error((await r.json()).error);
+          await del('voices', id); toast('Voice removed'); render();
+        } catch (err) { toast(err.message); }
+      }
+      break;
     case 'music-del': if (confirm('Remove this song?')) { await del('music', id); render(); } break;
     case 'event-del': if (confirm('Remove this event?')) { await del('events', id); render(); } break;
     case 'msg-del': if (confirm('Delete this message?')) { await del('messages', id); render(); } break;
@@ -1759,7 +1929,7 @@ document.addEventListener('submit', async (e) => {
       case 'msg-add': {
         const file = fd.get('file');
         const mediaId = file && file.size ? await saveMedia(file, `From ${val(fd, 'from')}`) : null;
-        await put('messages', { id: uid(), from: val(fd, 'from'), text: val(fd, 'text'), mediaId, at: Date.now(), read: false, replies: [] });
+        await put('messages', { id: uid(), from: val(fd, 'from'), text: val(fd, 'text'), mediaId, voiceId: String(fd.get('voiceId') || ''), at: Date.now(), read: false, replies: [] });
         toast('Message sent'); render();
         break;
       }
@@ -1767,6 +1937,41 @@ document.addEventListener('submit', async (e) => {
         const files = fd.getAll('files').filter((f) => f.size);
         for (const f of files) await saveMedia(f, val(fd, 'caption'));
         toast(`Added ${files.length} item${files.length === 1 ? '' : 's'}`); render();
+        break;
+      }
+      case 'narration-save': {
+        settings.narration = { day: fd.get('day'), reminder: fd.get('reminder'), message: fd.get('message'), other: fd.get('other') };
+        await put('settings', settings);
+        toast('Saved');
+        speak('Hello. This is how I will read the day.', { purpose: 'day' });
+        break;
+      }
+      case 'voice-create': {
+        if (!fd.get('consent')) { toast('Please confirm permission first'); break; }
+        const files = fd.getAll('files').filter((f) => f && f.size);
+        const blobs = rec.blob ? [rec.blob, ...files] : files;
+        if (!blobs.length) { toast('Record your voice or choose a recording first'); break; }
+        toast('Uploading the recording…');
+        const paths = [];
+        for (const b of blobs.slice(0, 5)) {
+          const ext = ((b.type || '').includes('mp4') ? 'm4a' : (b.type || '').includes('webm') ? 'webm' : (b.name || '').split('.').pop() || 'm4a').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 5);
+          const path = `${circleId}/voice-samples/${uid()}.${ext}`;
+          const { error } = await sb.storage.from('media').upload(path, b, { contentType: b.type || 'audio/mpeg' });
+          if (error) throw new Error(error.message);
+          paths.push(path);
+        }
+        toast('Creating the voice… this takes a few seconds');
+        const r = await fetch(`${SUPABASE_URL}/functions/v1/voiceclone`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
+          body: JSON.stringify({ action: 'create', circleId, name: val(fd, 'name'), paths }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) { toast(d.error || "Couldn't create the voice"); break; }
+        await put('voices', { id: d.voiceId, name: val(fd, 'name'), ownerUser: rec.blob ? me.id : null, at: Date.now() });
+        if (rec.url) URL.revokeObjectURL(rec.url);
+        rec.blob = null; rec.url = '';
+        toast('Voice ready ✓'); render();
+        setTimeout(() => speak(`Hello, ${settings.name || 'there'}. It's me. I love you.`, { elevenVoiceId: d.voiceId }), 400);
         break;
       }
       case 'music-link-add': {
@@ -1919,7 +2124,7 @@ async function checkReminders() {
   chime();
   setTimeout(() => speak(isEvent
     ? `Just a gentle reminder. In one hour, at ${fmtHM(due.time)}, you have ${due.title}. ${due.sub || ''}`
-    : `Just a gentle reminder. It's time to ${due.title.charAt(0).toLowerCase() + due.title.slice(1)}. ${due.sub || ''}`), 1600);
+    : `Just a gentle reminder. It's time to ${due.title.charAt(0).toLowerCase() + due.title.slice(1)}. ${due.sub || ''}`, { purpose: 'reminder' }), 1600);
 }
 
 // The family's chosen warm voice ("Brady J – Friendly, Casual, Warm").
