@@ -517,3 +517,38 @@ details.how p { margin: .5rem 0 0; font-size: .92rem; }
 .feed-audio { width: 100%; height: 2.4rem; }
 @media (max-width: 420px) { .reply-bar { grid-template-columns: 1fr; } }
 @media (prefers-reduced-motion: reduce) { .vn-dot { animation: none; } }
+
+/* ---------- Picture frame ---------- */
+.slideshow-btn { margin-bottom: 1rem; }
+#frame { position: fixed; inset: 0; z-index: 80; background: #1d1714; color: #fff; overflow: hidden; cursor: pointer; -webkit-user-select: none; user-select: none; }
+#frame::before, #frame::after { content: ""; position: absolute; left: 0; right: 0; z-index: 1; pointer-events: none; }
+#frame::before { top: 0; height: 40%; background: linear-gradient(180deg, rgba(0,0,0,.55), transparent); }
+#frame::after { bottom: 0; height: 35%; background: linear-gradient(0deg, rgba(0,0,0,.6), transparent); }
+#frame.light::before, #frame.light::after, #frame.night::before, #frame.night::after { display: none; }
+.fr-stage { position: absolute; inset: 0; }
+.fr-layer { position: absolute; inset: 0; opacity: 0; transition: opacity 1.8s ease; }
+.fr-layer.on { opacity: 1; }
+.fr-bg { position: absolute; inset: -40px; width: calc(100% + 80px); height: calc(100% + 80px); object-fit: cover; filter: blur(28px) brightness(.6); max-width: none; }
+.fr-fg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; animation: kenburns 14s ease-out both; }
+@keyframes kenburns { from { transform: scale(1); } to { transform: scale(1.05); } }
+.fr-info { position: absolute; z-index: 2; top: max(28px, env(safe-area-inset-top)); left: 28px; right: 28px; text-shadow: 0 2px 16px rgba(0,0,0,.5); }
+.fr-day { font-size: 1.4rem; font-weight: 600; }
+.fr-clock { font-family: var(--serif); font-size: clamp(3.4rem, 15vw, 7.5rem); font-weight: 600; line-height: 1; margin-top: .1rem; }
+.fr-next { display: inline-block; margin-top: .8rem; padding: .4rem .9rem; border-radius: 999px; background: rgba(0,0,0,.35); font-weight: 600; font-size: 1.05rem; text-shadow: none; }
+.fr-cap { position: absolute; z-index: 2; left: 28px; right: 28px; bottom: calc(52px + env(safe-area-inset-bottom)); font-size: 1.15rem; text-shadow: 0 2px 12px rgba(0,0,0,.6); }
+.fr-title { font-family: var(--serif); font-size: 1.7rem; font-weight: 600; line-height: 1.2; }
+.fr-hint { position: absolute; z-index: 2; left: 0; right: 0; bottom: calc(16px + env(safe-area-inset-bottom)); text-align: center; font-size: .9rem; opacity: .7; }
+#frame.light { background: var(--paper); color: var(--ink); }
+#frame.light .fr-info, #frame.light .fr-cap, #frame.light .fr-hint { text-shadow: none; }
+#frame.light .fr-next { background: var(--card); box-shadow: var(--shadow); }
+.fr-garden { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 11rem 28px 4rem; }
+.fr-garden .plant { width: min(42vw, 11rem); }
+.fr-g-title { font-family: var(--serif); font-size: 2rem; font-weight: 600; margin-top: .6rem; }
+.fr-flowers { display: flex; flex-wrap: wrap; justify-content: center; gap: .3rem; max-width: 30rem; margin: .8rem 0; }
+.fr-flowers .mini-flower { width: 2.2rem; height: 2.2rem; }
+.fr-g-sub { color: var(--muted); font-size: 1.15rem; max-width: 24rem; }
+#frame.night { background: #0e0b0a; color: #b9a99b; }
+#frame.night .fr-info { text-shadow: none; }
+.fr-night { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; padding-bottom: 22vh; font-family: var(--serif); font-size: 1.6rem; line-height: 1.4; text-align: center; }
+.fr-moon { width: 4.5rem; height: 4.5rem; border-radius: 50%; box-shadow: inset -14px -6px 0 0 #d8c7a8; margin-bottom: 1.2rem; opacity: .8; }
+@media (prefers-reduced-motion: reduce) { .fr-fg { animation: none; } .fr-layer { transition-duration: .3s; } }

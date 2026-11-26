@@ -472,6 +472,7 @@ const DEFAULTS = {
   id: 'main', name: '', pin: '1234', scale: 1, voice: true, voiceName: '', rate: 0.85, voiceEngine: 'eleven', elevenVoiceId: '',
   city: '', lat: null, lon: null, place: '', units: 'fahrenheit', helpPersonId: '',
   about: { fullName: '', address: '', birthday: '', phone: '', facts: '' },
+  frame: { on: true, idleMin: 3 },
 };
 let settings = structuredClone(DEFAULTS);
 
@@ -505,7 +506,8 @@ async function seedExamples(includeBasics) {
 }
 
 function mergeSettings(s) {
-  return { ...structuredClone(DEFAULTS), ...(s || {}), about: { ...DEFAULTS.about, ...((s && s.about) || {}) } };
+  return { ...structuredClone(DEFAULTS), ...(s || {}), about: { ...DEFAULTS.about, ...((s && s.about) || {}) },
+    frame: { ...DEFAULTS.frame, ...((s && s.frame) || {}) } };
 }
 async function loadSettings() {
   const s = storeOf('settings').get('main');
@@ -908,7 +910,8 @@ async function viewPhotos() {
       ${m.at > seen ? '<span class="new-pill on-photo">New</span>' : ''}
       <div class="cap">${esc(m.caption || ' ')}${m.from ? `<span class="cap-from">From ${esc(shortName(m.from))}</span>` : ''}</div></a>`;
   }));
-  return topbar('Photos') + `<div class="gallery">${cards.join('')}</div>`;
+  return topbar('Photos') + `<button class="btn big wide slideshow-btn" data-action="frame-open">▶ Show as a slideshow</button>
+    <div class="gallery">${cards.join('')}</div>`;
 }
 
 async function viewPhoto(id) {
@@ -1883,6 +1886,11 @@ async function careSettings() {
         `<option value="${v}" ${Number(settings.scale) === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       <label class="inline"><input type="checkbox" name="voice" ${settings.voice ? 'checked' : ''}>
         Read reminders and messages aloud</label>
+      <label class="inline"><input type="checkbox" name="frameOn" ${settings.frame?.on ? 'checked' : ''}>
+        Picture frame when the phone isn't being used</label>
+      <label>Start the picture frame after <select name="frameIdle">${[2, 3, 5, 10, 15].map((n) =>
+        `<option value="${n}" ${Number(settings.frame?.idleMin) === n ? 'selected' : ''}>${n} minutes</option>`).join('')}</select></label>
+      <button class="btn small" type="button" data-action="frame-open">▶ Preview the picture frame</button>
       <label>New family PIN <span class="hint">(leave blank to keep current)</span>
         <input type="password" name="pin" inputmode="numeric" minlength="4" maxlength="8" autocomplete="new-password"></label>
       <button class="btn primary" type="submit">Save settings</button>
@@ -1990,6 +1998,7 @@ document.addEventListener('click', async (e) => {
       break;
     }
     case 'vnote': await startVoiceNote(el.dataset.store, id); break;
+    case 'frame-open': await openFrame(); break;
     case 'vnote-stop': if (vn.recorder) vn.recorder.stop(); break;
     case 'vnote-cancel': if (vn.recorder) { vn.cancelled = true; vn.recorder.stop(); } break;
     case 'song': await toggleSong(id, el); break;
@@ -2318,6 +2327,7 @@ document.addEventListener('submit', async (e) => {
         settings.name = val(fd, 'name');
         settings.scale = Number(fd.get('scale'));
         settings.voice = fd.get('voice') === 'on';
+        settings.frame = { on: fd.get('frameOn') === 'on', idleMin: Number(fd.get('frameIdle')) || 3 };
         const pin = val(fd, 'pin');
         if (pin) {
           if (!/^\d{4,8}$/.test(pin)) { toast('PIN must be 4–8 digits'); break; }
@@ -2361,6 +2371,7 @@ async function checkReminders() {
     return !shown.has(`${dayKey()}:${t.key}`);
   });
   if (!due) return;
+  if (frame.el) closeFrame(); // a reminder always comes first
   shown.add(`${dayKey()}:${due.key}`);
   snoozed.delete(due.key);
   overlayKey = due.key;
@@ -2523,6 +2534,101 @@ async function enterCircle() {
   startTimers();
 }
 
+// ================================================================ picture-frame mode
+// After a few quiet minutes on the loved one's phone, it becomes a picture frame:
+// family photos with a big clock, her garden now and then, and a calm dark clock at night.
+const frame = { el: null, timer: null, slides: [], i: 0, wake: null, lastActivity: Date.now() };
+const isNight = (d = new Date()) => d.getHours() >= 21 || d.getHours() < 6;
+['pointerdown', 'keydown', 'touchstart', 'wheel'].forEach((ev) =>
+  addEventListener(ev, () => { frame.lastActivity = Date.now(); }, { passive: true, capture: true }));
+function frameShouldStart() {
+  if (frame.el || myRole !== 'device' || !circleId || !settings.frame?.on) return false;
+  if (Date.now() - frame.lastActivity < (settings.frame.idleMin || 3) * 60000) return false;
+  if (!$overlay.hidden || vn.recorder || nowPlaying || $app.querySelector('.player iframe')) return false;
+  if ([...document.querySelectorAll('video, audio')].some((v) => !v.paused)) return false;
+  return true;
+}
+async function openFrame() {
+  if (frame.el) return;
+  const photos = (await galleryItems()).filter((m) => !isVideo(m)).slice(0, 60);
+  const slides = [];
+  photos.forEach((m, i) => { slides.push({ type: 'photo', m }); if (i % 5 === 4) slides.push({ type: 'garden' }); });
+  if (!slides.some((x) => x.type === 'garden')) slides.push({ type: 'garden' });
+  frame.slides = slides; frame.i = 0;
+  const el = document.createElement('div');
+  el.id = 'frame';
+  el.setAttribute('role', 'dialog');
+  el.setAttribute('aria-label', 'Picture frame. Tap anywhere to go back.');
+  el.innerHTML = `<div class="fr-stage"></div>
+    <div class="fr-info"><div class="fr-day"></div><div class="fr-clock" data-clock>${fmtClock(new Date())}</div><div class="fr-next"></div></div>
+    <div class="fr-cap"></div><div class="fr-hint">Tap anywhere to go back</div>`;
+  el.addEventListener('click', closeFrame);
+  document.body.appendChild(el);
+  frame.el = el;
+  keepAwake();
+  await showSlide();
+  frame.timer = setInterval(showSlide, 12000);
+}
+async function keepAwake() {
+  try { if (frame.el && navigator.wakeLock && !frame.wake) { frame.wake = await navigator.wakeLock.request('screen'); frame.wake.addEventListener('release', () => { frame.wake = null; }); } } catch { /* not supported */ }
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') keepAwake(); });
+function closeFrame() {
+  if (!frame.el) return;
+  clearInterval(frame.timer);
+  frame.el.remove();
+  frame.el = null;
+  if (frame.wake) { frame.wake.release().catch(() => {}); frame.wake = null; }
+  frame.lastActivity = Date.now();
+  render();
+}
+async function showSlide() {
+  const el = frame.el;
+  if (!el) return;
+  const now = new Date();
+  const stage = el.querySelector('.fr-stage');
+  const cap = el.querySelector('.fr-cap');
+  el.querySelector('.fr-day').textContent = `${now.toLocaleDateString([], { weekday: 'long' })}, ${now.toLocaleDateString([], { month: 'long', day: 'numeric' })}`;
+  el.querySelector('[data-clock]').textContent = fmtClock(now);
+  const { items, doneMap } = await todayItems();
+  const next = focusItem(items, doneMap, now);
+  el.querySelector('.fr-next').innerHTML = next && !isNight(now)
+    ? `${next.time <= nowHM(now) ? 'Now' : 'Next · ' + esc(fmtHM(next.time))}: ${esc(next.icon)} ${esc(next.title)}` : '';
+  el.querySelector('.fr-next').hidden = !next || isNight(now);
+
+  let layer = document.createElement('div');
+  layer.className = 'fr-layer';
+  if (isNight(now)) {
+    el.className = 'night';
+    layer.innerHTML = `<div class="fr-night"><div class="fr-moon" aria-hidden="true"></div><div>It's nighttime.<br>Time to rest. Sleep well.</div></div>`;
+    cap.innerHTML = '';
+  } else {
+    const slide = frame.slides[frame.i++ % frame.slides.length];
+    if (slide.type === 'photo') {
+      el.className = '';
+      const url = await mediaUrl(slide.m.id);
+      layer.innerHTML = `<img class="fr-bg" src="${url}" alt=""><img class="fr-fg" src="${url}" alt="${esc(slide.m.caption || '')}">`;
+      cap.innerHTML = [slide.m.caption ? `<div class="fr-title">${esc(slide.m.caption)}</div>` : '', slide.m.from ? `<div>From ${esc(shortName(slide.m.from))}</div>` : ''].join('');
+    } else {
+      el.className = 'light';
+      const done = items.filter((t) => doneMap.has(t.key)).length;
+      const blooms = (await all('garden')).sort((a, b) => a.date.localeCompare(b.date));
+      layer.innerHTML = `<div class="fr-garden">
+        ${items.length ? plantSVG(growthStage(done, items.length)) : ''}
+        <div class="fr-g-title">${blooms.length ? 'Your garden' : 'Your flower'}</div>
+        ${blooms.length ? `<div class="fr-flowers">${blooms.slice(-60).map((b) => miniFlower(b.color || flowerColor(b.date))).join('')}</div>
+          <div class="fr-g-sub">${blooms.length === 1 ? '1 flower' : blooms.length + ' flowers'}, one for every day you did everything.</div>`
+          : `<div class="fr-g-sub">${items.length ? `${done} of ${items.length} done today. It grows with every task.` : 'It grows with every task you do.'}</div>`}
+      </div>`;
+      cap.innerHTML = '';
+    }
+  }
+  const old = [...stage.children];
+  stage.appendChild(layer);
+  requestAnimationFrame(() => requestAnimationFrame(() => layer.classList.add('on')));
+  setTimeout(() => old.forEach((o) => o.remove()), 2200);
+}
+
 let timersStarted = false;
 function startTimers() {
   if (timersStarted) return;
@@ -2532,6 +2638,7 @@ function startTimers() {
     document.querySelectorAll('[data-clock]').forEach((el) => { el.textContent = fmtClock(new Date()); });
     if (dayKey() !== lastDay) { lastDay = dayKey(); render(); }
     checkReminders();
+    if (frameShouldStart()) openFrame();
   }, 20 * 1000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) { softRender(); checkReminders(); } });
   setTimeout(checkReminders, 1500);
