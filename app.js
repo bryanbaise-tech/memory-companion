@@ -957,9 +957,9 @@ async function viewHelp() {
 
 // ================================================================ family (caregiver) mode
 const CARE_TABS = [
-  ['activity', 'Today'], ['tasks', 'Daily tasks'], ['meds', 'Medicines'], ['calendar', 'Calendar'],
-  ['messages', 'Send message'], ['photos', 'Photos & videos'], ['music', 'Music'],
-  ['people', 'People'], ['about', 'About & help'], ['circle', 'Family & devices'], ['settings', 'Settings'],
+  ['activity', 'Today'], ['circle', 'Family & devices'], ['messages', 'Send message'], ['photos', 'Photos & videos'],
+  ['tasks', 'Daily tasks'], ['meds', 'Medicines'], ['calendar', 'Calendar'], ['music', 'Music'],
+  ['people', 'People'], ['about', 'About & help'], ['settings', 'Settings'],
 ];
 
 async function viewCare(tab = 'activity') {
@@ -1035,7 +1035,20 @@ async function careActivity() {
   const replies = msgs.flatMap((m) => (m.replies || []).map((r) => ({ ...r, to: m.from })))
     .sort((a, b) => b.at - a.at).slice(0, 10);
   const unread = msgs.filter((m) => !m.read).length;
-  return `
+  let pairPrompt = '';
+  if (myRole === 'family') {
+    const { count } = await sb.from('members').select('user_id', { count: 'exact', head: true }).eq('circle_id', circleId).eq('role', 'device');
+    if (!count) {
+      pairPrompt = `
+        <a class="pair-prompt" href="#care/circle">
+          <span class="pp-ic">${icon('phone')}</span>
+          <span><span class="kicker">Next step</span><span class="pp-title">Pair ${esc(settings.name || 'their')}${settings.name ? "'s" : ''} phone</span>
+          <span class="pp-sub">Get a 6-digit code to set up their device — no password needed.</span></span>
+          <span class="chev">›</span>
+        </a>`;
+    }
+  }
+  return `${pairPrompt}
     <div class="stat-row">
       <div class="stat"><div class="n">${done.length}/${items.length}</div><div class="l">done today</div></div>
       <div class="stat"><div class="n" style="color:${missed.length ? 'var(--shu)' : 'inherit'}">${missed.length}</div><div class="l">overdue</div></div>

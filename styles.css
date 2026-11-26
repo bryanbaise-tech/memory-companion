@@ -335,7 +335,7 @@ a.paper { margin-top: 1.2rem; }
 /* ---------- Caregiver ---------- */
 .care-banner { background: var(--ink); color: var(--paper); border-radius: var(--radius); padding: .8rem 1.1rem; margin-bottom: 1rem; display: flex; align-items: center; justify-content: space-between; gap: .6rem; flex-wrap: wrap; }
 .care-banner strong { font-family: var(--serif); font-size: 1.1rem; }
-.tabs { display: flex; gap: .4rem; overflow-x: auto; padding-bottom: .4rem; margin-bottom: 1rem; scrollbar-width: none; }
+.tabs { display: flex; flex-wrap: wrap; gap: .45rem; margin-bottom: 1.1rem; }
 .tabs a { flex: none; padding: .45rem .95rem; border-radius: 999px; background: var(--card); color: var(--ink); text-decoration: none; font-weight: 700; font-size: .88rem; box-shadow: var(--shadow); }
 .tabs a.on { background: var(--ai); color: #fff; }
 form.stack { display: grid; gap: .75rem; }
@@ -411,3 +411,14 @@ textarea { min-height: 6rem; resize: vertical; }
   padding: .6rem 1rem; margin-bottom: .9rem; font-size: .9rem;
 }
 .problem { margin-top: 2rem; }
+
+.pair-prompt {
+  display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem;
+  background: var(--card); border-radius: var(--radius); padding: 1rem 1.1rem;
+  color: var(--ink); text-decoration: none; box-shadow: var(--shadow); border: 2px solid var(--ai);
+}
+.pp-ic { width: 3.2rem; height: 3.2rem; border-radius: 50%; background: var(--ai); color: #fff; display: grid; place-items: center; flex: none; }
+.pp-ic .ic { width: 1.5rem; height: 1.5rem; }
+.pp-title { display: block; font-family: var(--serif); font-size: 1.3rem; font-weight: 700; }
+.pp-sub { display: block; color: var(--muted); font-size: .9rem; }
+.pair-prompt .kicker { color: var(--ai); }
