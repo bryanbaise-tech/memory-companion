@@ -46,9 +46,19 @@ model here.
 
 ## Roadmap
 
-1. ~~Shared backend so family can send messages/photos and see check-ins~~ — done.
-2. **Real push notifications** for reminders even when the app is closed.
-3. **Native app** (React Native / Expo) for the App Store and Play Store, with
-   photo-library access and a "lock to this app" kiosk mode.
-4. Voice replies, video calling inside the app, medication tracking, and alerts
-   to caregivers when a task is missed.
+Done: shared backend, family voices, music links, who-sent-it labels on photos.
+
+1. **New look**: photo and faces first, soft colors, readable type (in progress).
+2. **Mom can reply**: a heart button and voice notes back to the sender, plus "Mom saw it."
+3. **Picture-frame mode**: an idle slideshow with a big clock, dimmed at night.
+4. **Evening calm mode**: warmer screen, music and a familiar voice from late afternoon.
+5. **Life story** and "On this day."
+6. **Native iPhone milestone**, done as one piece:
+   - a Swift app that wraps the web app, with the web files bundled inside so it opens offline
+   - real notifications, including "Mom missed her pills" alerts to family
+   - a share extension, so family can send photos from the Photos app
+   - in-app account deletion (Apple requires it). Decision still needed: when a
+     relative deletes their account, what happens to photos and messages they
+     shared? Suggested: they stay with the family unless the person also chooses
+     "delete what I shared"; deleting the whole family circle removes everything.
+7. **App Store** release, which needs the Apple Developer Program ($99 a year).

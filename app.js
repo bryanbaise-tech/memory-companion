@@ -606,8 +606,8 @@ const avatar = (url, name) => `<div class="avatar">${url ? `<img src="${url}" al
 // ================================================================ companion screens
 async function viewHome() {
   const now = new Date();
-  const [{ items, doneMap }, messages, events, gallery] =
-    await Promise.all([todayItems(), all('messages'), all('events'), galleryItems()]);
+  const [{ items, doneMap }, messages, events, gallery, people] =
+    await Promise.all([todayItems(), all('messages'), all('events'), galleryItems(), all('people')]);
   refreshWeather();
 
   const part = partOfDay(now);
@@ -658,23 +658,30 @@ async function viewHome() {
            <span class="now-title">${open.length ? 'Time to rest and relax' : 'You finished everything today'}</span></span></a>`
       : '';
 
-  const memoryHtml = memory ? `
-    <a class="paper memory" href="#photo/${memory.id}">
-      <div class="section-label">A memory for today</div>
-      <img src="${await mediaUrl(memory.id)}" alt="${esc(memory.caption)}">
-      ${memory.caption ? `<div class="memory-cap">${esc(memory.caption)}</div>` : ''}
-    </a>` : '';
+  // Photo hero: the newest photo from family, otherwise today's memory.
+  const heroPic = fresh[0] || memory;
+  let heroHtml = '';
+  if (heroPic) {
+    const url = await mediaUrl(heroPic.id);
+    const from = shortName(heroPic.from);
+    const who = fresh.length ? freshFrom : (from ? [from] : []);
+    const face = who.length === 1 ? avatar(await faceFor(who[0]), who[0]).replace('class="avatar"', 'class="avatar sm"') : '';
+    const title = fresh.length ? `From ${freshWho}` : (heroPic.caption || (from ? `From ${from}` : 'A memory for today'));
+    const sub = fresh.length ? `${fresh.length === 1 ? 'A new photo' : fresh.length + ' new photos'} · tap to see`
+      : (heroPic.caption && from ? `From ${from}` : 'A memory for today');
+    heroHtml = `
+      ${isVideo(heroPic) ? `<video class="hero-img" src="${url}#t=0.5" muted playsinline preload="metadata"></video>` : `<img class="hero-img" src="${url}" alt="">`}
+      <a class="hero-from" href="${fresh.length ? '#photos' : '#photo/' + heroPic.id}">${face}
+        <span><span class="hf-title">${esc(title)}</span><span class="hf-sub">${esc(sub)}</span></span>
+        ${fresh.length ? `<span class="new-pill">New</span>` : ''}</a>`;
+  }
 
-  const freshHtml = fresh.length ? `
-    <a class="paper new-photos" href="#photos">
-      <div class="section-label">${fresh.length === 1 ? 'A new photo' : fresh.length + ' new photos'}</div>
-      <div class="from-row">${freshFrom.length === 1 ? avatar(await faceFor(freshFrom[0]), freshFrom[0]).replace('class="avatar"', 'class="avatar sm"') : `<span class="latest-ic">${icon('photo')}</span>`}
-        <div class="from-name">From ${esc(freshWho)}</div></div>
-      <div class="np-strip">${(await Promise.all(fresh.slice(0, 3).map(async (m) => {
-        const url = await mediaUrl(m.id);
-        return isVideo(m) ? `<video src="${url}#t=0.5" muted playsinline preload="metadata"></video>` : `<img src="${url}" alt="">`;
-      }))).join('')}</div>
-    </a>` : '';
+  const faces = people.filter((p) => p.name).sort((x, y) => x.name.localeCompare(y.name)).slice(0, 8);
+  const facesHtml = faces.length ? `
+    <nav class="faces" aria-label="Family">${(await Promise.all(faces.map(async (p) => `
+      <a class="face" href="#people">${avatar(await mediaUrl(p.photoId), p.name).replace('class="avatar"', 'class="avatar md"')}
+        <span class="face-name">${esc(shortName(p.name).split(' ')[0])}</span></a>`))).join('')}
+    </nav>` : '';
 
   const latestHtml = latest ? `
     <a class="paper latest ${latest.read ? '' : 'unread'}" href="#message/${latest.id}">
@@ -700,21 +707,18 @@ async function viewHome() {
   const familyStrip = myRole === 'family'
     ? `<a class="family-strip" href="#care">${icon('gear')} You're seeing ${esc(settings.name || 'their')}${settings.name ? "'s" : ''} screen · <b>Family tools</b></a>` : '';
   return `${familyStrip}
-    <header class="hero sky-${part}">
-      <div class="sun" aria-hidden="true"></div>
-      <svg class="hills" viewBox="0 0 400 110" preserveAspectRatio="none" aria-hidden="true">
-        <path class="h1" d="M0 70 C50 40 95 45 140 62 C185 78 220 30 280 38 C330 45 365 60 400 52 V110 H0Z"/>
-        <path class="h2" d="M0 90 C60 72 120 80 190 90 C260 100 320 74 400 84 V110 H0Z"/>
-      </svg>
-      <div class="hero-text">
-        <div class="season">${season(now)} ${part === 'night' ? 'night' : part}</div>
-        <div class="day">${esc(dayText)}</div>
-        <div class="date">${esc(dateText)}</div>
+    <header class="hero ${heroPic ? 'has-photo' : 'sky-' + part}">
+      ${heroHtml}
+      <div class="hero-top">
+        <div><div class="day">${esc(dayText)}</div><div class="date">${esc(dateText)}</div></div>
         <div class="clock" data-clock>${fmtClock(now)}</div>
-        <div class="greet">${esc(greet)}</div>
-        <button class="hero-speak" data-action="speak" data-purpose="day" data-text="${esc(sayDay)}">${icon('speak')} Read me the day</button>
       </div>
+      ${heroPic ? '' : `<div class="greet">${esc(greet)}</div>`}
     </header>
+
+    ${facesHtml}
+
+    <button class="say-day" data-action="speak" data-purpose="day" data-text="${esc(sayDay)}">${icon('speak')} Read me the day</button>
 
     ${w ? `<div class="weather"><span class="w-ic">${wIcon}</span>
       <span><span class="w-temp">${w.temp}°</span> <span class="w-text">${esc(wText)}</span>
@@ -736,10 +740,8 @@ async function viewHome() {
 
     <a class="help-btn" href="#help">${icon('phone')} I need help</a>
 
-    ${freshHtml}
     ${upcomingHtml}
     ${latestHtml}
-    ${memoryHtml}
 
     <div class="care-entry"><a class="btn small ghost" href="#care">${icon('gear')} Family settings</a></div>`;
 }
