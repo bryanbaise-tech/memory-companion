@@ -206,6 +206,7 @@ const ICON = {
   med: '<path d="M10.5 3.5a5 5 0 017 7l-7 7a5 5 0 01-7-7z"/><path d="M7 7l7 7"/>',
   music: '<path d="M9 18V5l11-2v13"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="17.5" cy="16" r="2.5"/>',
   about: '<circle cx="12" cy="8" r="4"/><path d="M4.5 21c1-4 4-6.5 7.5-6.5s6.5 2.5 7.5 6.5"/>',
+  book: '<path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5z"/><path d="M4 20.5A2.5 2.5 0 0 1 6.5 18H20v3H6.5"/><path d="M9 7.5h7"/>',
   phone: '<path d="M5 4h4l2 5-2.5 1.5a11 11 0 005 5L15 13l5 2v4a2 2 0 01-2 2A16 16 0 013 6a2 2 0 012-2z"/>',
   speak: '<path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M16.5 8.5a5 5 0 010 7M19 6a8.5 8.5 0 010 12"/>',
   home: '<path d="M3 11l9-7 9 7"/><path d="M5 10v10h14V10"/><path d="M10 20v-5h4v5"/>',
@@ -675,8 +676,8 @@ const avatar = (url, name) => `<div class="avatar">${url ? `<img src="${url}" al
 // ================================================================ companion screens
 async function viewHome() {
   const now = new Date();
-  const [{ items, doneMap }, messages, events, gallery, people] =
-    await Promise.all([todayItems(), all('messages'), all('events'), galleryItems(), all('people')]);
+  const [{ items, doneMap }, messages, events, gallery, people, otd, storyCount] =
+    await Promise.all([todayItems(), all('messages'), all('events'), galleryItems(), all('people'), onThisDay(), all('story').then((x) => x.length)]);
   refreshWeather();
 
   const part = partOfDay(now);
@@ -713,6 +714,7 @@ async function viewHome() {
     upcoming[0] ? `${upcoming[0].date === today ? 'Later today' : fmtDay(upcoming[0].date).split(' · ')[0]}, you have ${upcoming[0].title}${upcoming[0].time ? ' at ' + fmtHM(upcoming[0].time) : ''}.` : '',
     unread ? `You have ${unread === 1 ? 'a new message' : unread + ' new messages'} from your family.` : '',
     fresh.length ? `${freshFrom.length ? freshWho : 'Your family'} sent you ${fresh.length === 1 ? 'a new photo' : fresh.length + ' new photos'}.` : '',
+    otd ? otdSentence(otd) : '',
     'Have a lovely day.',
   ].filter(Boolean).join(' ');
 
@@ -728,7 +730,12 @@ async function viewHome() {
       : '';
 
   // Photo hero: the newest photo from family, otherwise today's memory.
-  const heroPic = fresh[0] || memory;
+  // On a day with a life-story photo, that comes before a random memory.
+  const otdStory = otd && otd.kind !== 'photo' ? otd.items.find((x) => x.photoId) : null;
+  const heroPic = fresh[0] || (otdStory && {
+    id: otdStory.photoId, caption: otdStory.title, from: '', link: `#story/${otdStory.id}`,
+    sub: otd.kind === 'day' ? `On this day in ${otdStory.year}` : `This month in ${otdStory.year}`,
+  }) || memory;
   let heroHtml = '';
   if (heroPic) {
     const url = await mediaUrl(heroPic.id);
@@ -737,10 +744,10 @@ async function viewHome() {
     const face = who.length === 1 ? avatar(await faceFor(who[0]), who[0]).replace('class="avatar"', 'class="avatar sm"') : '';
     const title = fresh.length ? `From ${freshWho}` : (heroPic.caption || (from ? `From ${from}` : 'A memory for today'));
     const sub = fresh.length ? `${fresh.length === 1 ? 'A new photo' : fresh.length + ' new photos'} · tap to see`
-      : (heroPic.caption && from ? `From ${from}` : 'A memory for today');
+      : heroPic.sub || (heroPic.caption && from ? `From ${from}` : 'A memory for today');
     heroHtml = `
       ${isVideo(heroPic) ? `<video class="hero-img" src="${url}#t=0.5" muted playsinline preload="metadata"></video>` : `<img class="hero-img" src="${url}" alt="">`}
-      <a class="hero-from" href="${fresh.length ? '#photos' : '#photo/' + esc(heroPic.id)}">${face}
+      <a class="hero-from" href="${fresh.length ? '#photos' : esc(heroPic.link || '#photo/' + heroPic.id)}">${face}
         <span><span class="hf-title">${esc(title)}</span><span class="hf-sub">${esc(sub)}</span></span>
         ${fresh.length ? `<span class="new-pill">New</span>` : ''}</a>`;
   }
@@ -800,11 +807,14 @@ async function viewHome() {
 
     ${focusHtml}
 
+    ${otd && !(otdStory && heroPic.link) ? await onThisDayCard(otd) : ''}
+
     <nav class="tiles" aria-label="Main menu">
       ${tile('#day', 'day', 'My Day', `${items.length - open.length} of ${items.length} done`, 't-ai')}
       ${tile('#messages', 'msg', 'Messages', unread ? `${unread} new` : 'From family', 't-shu', unread)}
       ${tile('#photos', 'photo', 'Photos', fresh.length ? `${fresh.length} new` : '&amp; videos', 't-kin', fresh.length)}
       ${tile('#people', 'family', 'Family', 'Call or see', 't-fuji')}
+      ${tile('#story', 'book', 'My Life', storyCount ? `${storyCount} ${storyCount === 1 ? 'story' : 'stories'} from your life` : 'Stories and old photos', 't-story wide')}
       ${tile('#meds', 'med', 'Medicines', 'What to take', 't-matcha')}
       ${tile('#calendar', 'cal', 'Calendar', upcoming[0] ? esc(fmtDay(upcoming[0].date).split(' · ')[0]) : 'Appointments', 't-sora')}
       ${tile('#music', 'music', 'Music', 'Favorite songs', 't-sakura')}
@@ -1050,6 +1060,134 @@ async function startVoiceNote(store, id) {
 }
 function flushRender() { render(); }
 
+// ================================================================ life story & "On this day"
+// Family writes chapters of the loved one's life (title, year, optional exact date, place,
+// the story, an old photo). She reads or hears them by decade under "My Life", and on the
+// anniversary a story comes up on her home screen and in "Read me the day".
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+const STORY_IDEAS = ['How you met Dad', 'Your wedding day', 'Where you grew up', 'Your first home', 'When the children were born',
+  'Your first job', 'A favorite holiday', 'A proud moment', 'Your best friend', 'A place you loved'];
+function storyWhen(x) {
+  const m = Number(x.month), d = Number(x.day);
+  return [m ? `${MONTHS[m - 1]}${d ? ' ' + d : ''}${x.year ? ',' : ''}` : '', x.year || ''].filter(Boolean).join(' ');
+}
+async function stories() {
+  return (await all('story')).sort((a, b) => (Number(a.year) || 9999) - (Number(b.year) || 9999)
+    || (Number(a.month) || 0) - (Number(b.month) || 0) || (Number(a.day) || 0) - (Number(b.day) || 0));
+}
+async function onThisDay(now = new Date()) {
+  const m = now.getMonth() + 1, d = now.getDate(), y = now.getFullYear();
+  const list = await stories();
+  const day = list.filter((x) => Number(x.month) === m && Number(x.day) === d && Number(x.year) < y);
+  if (day.length) return { kind: 'day', items: day };
+  const month = list.filter((x) => Number(x.month) === m && !Number(x.day) && Number(x.year) < y);
+  if (month.length) return { kind: 'month', items: month };
+  const photos = (await galleryItems()).filter((p) => {
+    const t = new Date(p.at);
+    return !isVideo(p) && t.getMonth() + 1 === m && t.getDate() === d && t.getFullYear() < y;
+  });
+  return photos.length ? { kind: 'photo', items: photos } : null;
+}
+function otdSentence(otd) {
+  const it = otd.items[0];
+  if (otd.kind === 'photo') return `${it.from ? shortName(it.from) + ' sent you a photo' : 'A photo arrived'} on this day ${yearsAgo(new Date(it.at).getFullYear())}.`;
+  return `${otd.kind === 'day' ? 'On this day' : 'This month'}, back in ${it.year}: ${it.title}.`;
+}
+const yearsAgo = (year) => { const n = new Date().getFullYear() - Number(year); return n === 1 ? 'a year ago' : `${n} years ago`; };
+async function onThisDayCard(otd) {
+  const it = otd.items[0];
+  if (otd.kind === 'photo') {
+    return `<a class="paper otd" href="#photo/${esc(it.id)}">
+      <div class="section-label">On this day</div>
+      <div class="otd-row"><img class="otd-pic" src="${await mediaUrl(it.id)}" alt="">
+        <div><div class="otd-title">${esc(yearsAgo(new Date(it.at).getFullYear()))} today</div>
+        <div class="otd-sub">${it.from ? `From ${esc(shortName(it.from))}` : ''}${it.caption ? ` · ${esc(it.caption)}` : ''}</div></div></div></a>`;
+  }
+  const pic = it.photoId ? `<img class="otd-pic" src="${await mediaUrl(it.photoId)}" alt="">` : `<span class="otd-ic">${icon('book')}</span>`;
+  return `<a class="paper otd" href="#story/${esc(it.id)}">
+      <div class="section-label">${otd.kind === 'day' ? 'On this day' : 'This month'} in ${esc(it.year)}</div>
+      <div class="otd-row">${pic}<div><div class="otd-title">${esc(it.title)}</div>
+        <div class="otd-sub">${esc(yearsAgo(it.year))}${it.place ? ` · ${esc(it.place)}` : ''}</div></div></div></a>`;
+}
+// The teller's own cloned voice, if they made one.
+const storyVoice = (x) => ([...storeOf('voices').values()].find((v) => v.ownerUser && v.ownerUser === x.byUser) || {}).id;
+
+async function viewStory(id) {
+  if (id) return viewStoryItem(id);
+  const list = await stories();
+  if (!list.length) return topbar('My Life') + empty('book', 'Your life story will appear here.', 'Your family can add stories and old photos in Family settings → Life story.');
+  const groups = new Map();
+  for (const x of list) {
+    const k = Number(x.year) ? `The ${Math.floor(Number(x.year) / 10) * 10}s` : 'Other memories';
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(x);
+  }
+  let html = '';
+  for (const [label, xs] of groups) {
+    html += `<div class="section-label">${esc(label)}</div>` + (await Promise.all(xs.map(async (x) => `
+      <a class="paper story-card" href="#story/${esc(x.id)}">
+        ${x.photoId ? `<img class="otd-pic" src="${await mediaUrl(x.photoId)}" alt="">` : `<span class="otd-ic">${icon('book')}</span>`}
+        <span><span class="story-when">${esc(storyWhen(x))}${x.place ? ` · ${esc(x.place)}` : ''}</span>
+          <span class="story-title">${esc(x.title)}</span></span>
+        <span class="chev">›</span>
+      </a>`))).join('');
+  }
+  return topbar('My Life') + `<p class="story-intro">Stories from your life, written by your family.</p>` + html;
+}
+async function viewStoryItem(id) {
+  const list = await stories();
+  const i = list.findIndex((x) => x.id === id);
+  if (i < 0) return viewStory();
+  const x = list[i];
+  const prev = list[i - 1], next = list[i + 1];
+  const when = storyWhen(x);
+  const say = `${x.title}. ${when}${x.place ? ', in ' + x.place : ''}. ${x.text || ''}`;
+  return topbar('', '#story', 'My Life') + `
+    <article class="paper letter story">
+      ${x.photoId ? `<div class="media"><img src="${await mediaUrl(x.photoId)}" alt="${esc(x.title)}"></div>` : ''}
+      <div class="kicker">${esc(when)}${x.place ? ` · ${esc(x.place)}` : ''}</div>
+      <h2>${esc(x.title)}</h2>
+      <div class="letter-text">${esc(x.text || '')}</div>
+      ${x.from ? `<div class="msg-when">Told by ${esc(shortName(x.from))}</div>` : ''}
+      <div class="btn-row">${speakBtn(say, 'Read it to me', { purpose: 'other', voice: storyVoice(x) })}</div>
+      ${x.from ? replyBar('story', x) : ''}
+    </article>
+    <div class="nav story-nav">
+      ${prev ? `<a class="btn big" href="#story/${esc(prev.id)}">‹ Earlier</a>` : '<span></span>'}
+      ${next ? `<a class="btn big" href="#story/${esc(next.id)}">Later ›</a>` : '<span></span>'}
+    </div>`;
+}
+
+async function careStory() {
+  const list = await stories();
+  const year = new Date().getFullYear();
+  const rows = await Promise.all(list.map(async (x) => `
+    <div class="list-item">
+      ${x.photoId ? `<img class="mini-thumb" src="${await mediaUrl(x.photoId)}" alt="">` : ''}
+      <span style="flex:1"><strong>${esc(x.title)}</strong><br><span class="meta">${esc(storyWhen(x))}${x.place ? ` · ${esc(x.place)}` : ''}${x.from ? ` · told by ${esc(shortName(x.from))}` : ''}</span></span>
+      <button class="btn small danger" data-action="story-del" data-id="${esc(x.id)}">Delete</button>
+    </div>`));
+  return `
+    <form class="paper stack" data-form="story-add">
+      <h2>Add to ${esc(settings.name || 'their')}${settings.name ? "'s" : ''} life story</h2>
+      <p class="hint">Old photos and the stories behind them. If you add the exact date, it comes up on that day each year ("On this day in 1962…").</p>
+      <div class="idea-chips">${STORY_IDEAS.map((t) => `<button class="chip" type="button" data-action="story-idea" data-text="${esc(t)}">${esc(t)}</button>`).join('')}</div>
+      <label>Title <input type="text" name="title" required maxlength="80" placeholder="e.g. Our wedding day"></label>
+      <div class="row">
+        <label>Year <input type="number" name="year" required min="1900" max="${year}" inputmode="numeric" placeholder="1962"></label>
+        <label>Month <span class="hint">(optional)</span><select name="month"><option value="">—</option>${MONTHS.map((m, i) => `<option value="${i + 1}">${m}</option>`).join('')}</select></label>
+        <label>Day <span class="hint">(optional)</span><input type="number" name="day" min="1" max="31" inputmode="numeric"></label>
+      </div>
+      <label>Place <span class="hint">(optional)</span><input type="text" name="place" maxlength="80" placeholder="e.g. St. Mary's, Chicago"></label>
+      <label>The story <span class="hint">(write it the way you'd tell it to them; it's read aloud)</span>
+        <textarea name="text" required maxlength="2000" rows="5" placeholder="You wore your mother's lace veil, and it rained all morning…"></textarea></label>
+      <label>Photo <span class="hint">(optional, an old photo from that time)</span><input type="file" name="file" accept="image/*"></label>
+      <label>Told by <input type="text" name="from" maxlength="40" value="${esc(shortName(myName))}"></label>
+      <button class="btn primary" type="submit">Add to the life story</button>
+    </form>
+    <div class="paper"><h2>The life story (${list.length})</h2>${rows.join('') || '<p class="hint">Nothing yet. Start with one story; a few sentences is plenty.</p>'}</div>`;
+}
+
 const telOf = (p) => (p.phone || '').replace(/[^\d+]/g, '');
 
 async function viewPeople() {
@@ -1256,7 +1394,7 @@ async function viewHelp() {
 
 // ================================================================ family (caregiver) mode
 const CARE_TABS = [
-  ['activity', 'Today'], ['circle', 'Family & devices'], ['messages', 'Send message'], ['photos', 'Photos & videos'], ['voices', 'Voices'],
+  ['activity', 'Today'], ['circle', 'Family & devices'], ['messages', 'Send message'], ['photos', 'Photos & videos'], ['story', 'Life story'], ['voices', 'Voices'],
   ['tasks', 'Daily tasks'], ['meds', 'Medicines'], ['calendar', 'Calendar'], ['music', 'Music'],
   ['people', 'People'], ['about', 'About & help'], ['settings', 'Settings'],
 ];
@@ -1280,7 +1418,7 @@ async function viewCare(tab = 'activity') {
         <button class="btn small" data-action="care-lock">Lock &amp; return</button></div>`;
   const views = {
     activity: careActivity, tasks: careTasks, meds: careMeds, calendar: careCalendar, messages: careMessages,
-    photos: carePhotos, voices: careVoices, music: careMusic, people: carePeople, about: careAbout, circle: careCircle, settings: careSettings,
+    photos: carePhotos, story: careStory, voices: careVoices, music: careMusic, people: carePeople, about: careAbout, circle: careCircle, settings: careSettings,
   };
   return banner + tabs + await (views[tab] || careActivity)();
 }
@@ -1554,6 +1692,9 @@ async function lovedOneFeed(msgs) {
   for (const m of msgs) {
     for (const r of m.replies || []) events.push({ ...r, to: shortName(m.from), what: 'message', about: m.text, link: null });
     if (m.readAt) events.push({ kind: 'seen', at: m.readAt, to: shortName(m.from), what: 'message', about: m.text, n: 1 });
+  }
+  for (const x of await all('story')) {
+    for (const r of x.replies || []) events.push({ ...r, to: shortName(x.from), what: 'story', about: x.title, thumb: x.photoId });
   }
   const seenGroups = new Map();
   for (const m of media.filter((x) => x.kind !== 'voice-note')) {
@@ -1960,7 +2101,7 @@ async function render() {
   const views = {
     home: viewHome, day: viewDay, messages: viewMessages, message: viewMessage,
     photos: viewPhotos, photo: viewPhoto, people: viewPeople, meds: viewMeds,
-    calendar: viewCalendar, music: viewMusic, about: viewAbout, help: viewHelp, care: viewCare,
+    calendar: viewCalendar, music: viewMusic, about: viewAbout, help: viewHelp, care: viewCare, story: viewStory,
   };
   let html;
   try {
@@ -2041,6 +2182,17 @@ document.addEventListener('click', async (e) => {
     }
     case 'vnote': await startVoiceNote(el.dataset.store, id); break;
     case 'frame-open': await openFrame(); break;
+    case 'story-idea': {
+      const f = el.closest('form');
+      if (f) { f.querySelector('[name=title]').value = text; f.querySelector('[name=year]').focus(); }
+      break;
+    }
+    case 'story-del': if (confirm('Delete this story?')) {
+      const x = await get('story', id);
+      await del('story', id);
+      if (x && x.photoId) await del('media', x.photoId);
+      render();
+    } break;
     case 'evening-preview': speak(await eveningWords(), { purpose: 'evening' }); break;
     case 'vnote-stop': if (vn.recorder) vn.recorder.stop(); break;
     case 'vnote-cancel': if (vn.recorder) { vn.cancelled = true; vn.recorder.stop(); } break;
@@ -2246,6 +2398,19 @@ document.addEventListener('submit', async (e) => {
         const mediaId = file && file.size ? await saveMedia(file, val(fd, 'text').slice(0, 120), false, val(fd, 'from')) : null;
         await put('messages', { id: uid(), from: val(fd, 'from'), text: val(fd, 'text'), mediaId, voiceId: String(fd.get('voiceId') || ''), at: Date.now(), read: false, replies: [] });
         toast('Message sent'); render();
+        break;
+      }
+      case 'story-add': {
+        const year = Number(fd.get('year'));
+        const month = Number(fd.get('month')) || 0;
+        const day = month ? Number(fd.get('day')) || 0 : 0;
+        if (!(year >= 1900 && year <= new Date().getFullYear())) { toast('Please enter a year like 1962'); break; }
+        if (day && (day < 1 || day > 31)) { toast('Please check the day'); break; }
+        const file = fd.get('file');
+        const from = val(fd, 'from') || shortName(myName);
+        const photoId = file && file.size ? await saveMedia(file, val(fd, 'title'), true, from, { kind: 'story' }) : null;
+        await put('story', { id: uid(), title: val(fd, 'title'), year, month, day, place: val(fd, 'place'), text: val(fd, 'text').slice(0, 2000), photoId, from, byUser: me.id, at: Date.now() });
+        toast('Added to the life story'); render();
         break;
       }
       case 'photo-add': {
@@ -2650,7 +2815,8 @@ function frameShouldStart() {
 }
 async function openFrame() {
   if (frame.el) return;
-  const photos = (await galleryItems()).filter((m) => !isVideo(m)).slice(0, 60);
+  const storyPics = (await stories()).filter((x) => x.photoId).map((x) => ({ id: x.photoId, caption: `${x.year ? x.year + ' · ' : ''}${x.title}`, from: '' }));
+  const photos = [...(await galleryItems()).filter((m) => !isVideo(m)).slice(0, 60), ...storyPics];
   const slides = [];
   photos.forEach((m, i) => { slides.push({ type: 'photo', m }); if (i % 5 === 4) slides.push({ type: 'garden' }); });
   if (!slides.some((x) => x.type === 'garden')) slides.push({ type: 'garden' });

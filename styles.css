@@ -573,3 +573,25 @@ body.evening .plant .sway { animation-duration: 9s; }
 .evening-card .btn { background: #fff7ee; border-color: #fff7ee; color: #4a3d5c; }
 .ev-moon { position: absolute; top: 1rem; right: 1.1rem; width: 2.6rem; height: 2.6rem; border-radius: 50%; box-shadow: inset -9px -4px 0 0 #f3d9a8; opacity: .9; }
 .settings-sub { font-size: 1.1rem; margin: .8rem 0 0; }
+
+/* ---------- Life story & On this day ---------- */
+.tile.wide { grid-column: 1 / -1; min-height: 6.4rem; flex-direction: row; align-items: center; justify-content: flex-start; gap: 1rem; }
+.tile.wide .tile-ic { margin-bottom: 0; flex: none; }
+.tile.wide .tile-name { margin-top: 0; }
+.tile.wide .tile-sub { margin-left: auto; text-align: right; max-width: 45%; }
+.t-story { --c: #f6e3cf; --deep: #9a5b2e; }
+.otd { margin-top: 0 !important; }
+.otd-row, .story-card { display: flex; align-items: center; gap: 1rem; }
+.otd-pic { width: 5rem; height: 5rem; border-radius: 14px; object-fit: cover; flex: none; filter: sepia(.15); }
+.otd-ic { width: 5rem; height: 5rem; border-radius: 14px; flex: none; display: grid; place-items: center; background: #f6e3cf; color: #9a5b2e; }
+.otd-ic .ic { width: 2rem; height: 2rem; }
+.otd-title, .story-title { display: block; font-family: var(--serif); font-size: 1.3rem; font-weight: 600; line-height: 1.25; }
+.otd-sub, .story-when { display: block; color: var(--muted); font-size: .95rem; }
+.story-card { margin-top: 0 !important; color: var(--ink); text-decoration: none; }
+.story-card .chev { margin-left: auto; }
+.story-intro { color: var(--muted); margin: -.6rem .2rem 0; }
+.letter.story .media img { width: 100%; max-height: 26rem; object-fit: contain; background: #2a2420; filter: sepia(.1); }
+.story-nav { display: flex; justify-content: space-between; gap: .6rem; margin-top: 1rem; }
+.idea-chips { display: flex; flex-wrap: wrap; gap: .4rem; }
+.chip { border: 1.5px solid var(--line); background: var(--card); border-radius: 999px; padding: .35rem .8rem; font: inherit; font-size: .88rem; font-weight: 600; color: var(--ink); cursor: pointer; }
+.chip:active { transform: scale(.97); }
