@@ -2214,7 +2214,14 @@ async function careSettings() {
       <p class="hint">Everything is saved securely online and shared only with the people in this care circle (see Family &amp; devices).</p>
       ${myRole === 'family' ? '<button class="btn small danger" data-action="reset">Delete this care circle…</button>' : ''}
     </div>
-    ${myRole === 'family' ? await recentlyDeleted() : ''}`;
+    ${myRole === 'family' ? await recentlyDeleted() : ''}
+    ${myRole === 'family' ? `
+    <form class="paper stack" data-form="delete-account">
+      <h2>Your account</h2>
+      <p class="hint">Deleting your account removes you from this care circle and deletes your cloned voice. The photos, messages and stories you shared stay with the family unless you tick the box.</p>
+      <label class="inline consent-check"><input type="checkbox" name="deleteShared"> Also delete everything I shared</label>
+      <button class="btn small danger" type="submit">Delete my account…</button>
+    </form>` : ''}`;
 }
 
 // ================================================================ router
@@ -2222,6 +2229,7 @@ let renderSeq = 0;
 async function render() {
   if (!circleId) return; // still signing in / pairing
   applyEvening();
+  syncNativeReminders();
   const seq = ++renderSeq;
   const [r = 'home', param] = location.hash.slice(1).split('/');
   const views = {
@@ -2471,7 +2479,8 @@ document.addEventListener('submit', async (e) => {
     switch (form.dataset.form) {
       case 'signin-email': {
         const email = val(fd, 'email');
-        const { error } = await sb.auth.signInWithOtp({ email, options: { emailRedirectTo: location.origin + location.pathname } });
+        // In the iPhone app, the email link reopens the app (memorycompanion://auth) instead of Safari.
+        const { error } = await sb.auth.signInWithOtp({ email, options: { emailRedirectTo: nativeApp ? 'memorycompanion://auth' : location.origin + location.pathname } });
         if (error) { toast(/rate|limit|seconds/i.test(error.message) ? 'Too many emails just now. Please wait a few minutes and try again.' : error.message); break; }
         showCheckEmail(email);
         break;
@@ -2537,6 +2546,19 @@ document.addEventListener('submit', async (e) => {
         const mediaId = file && file.size ? await saveMedia(file, val(fd, 'text').slice(0, 120), false, val(fd, 'from')) : null;
         await put('messages', { id: uid(), from: val(fd, 'from'), text: val(fd, 'text'), mediaId, voiceId: String(fd.get('voiceId') || ''), at: Date.now(), read: false, replies: [] });
         toast('Message sent'); render();
+        break;
+      }
+      case 'delete-account': {
+        const all = fd.get('deleteShared') === 'on';
+        if (!confirm(all ? 'Delete your account AND everything you shared? This cannot be undone.' : 'Delete your account? What you shared stays with the family. This cannot be undone.')) break;
+        const r = await fetch(`${SUPABASE_URL}/functions/v1/deleteaccount`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json', ...(await authHeaders()) }, body: JSON.stringify({ deleteShared: all }),
+        });
+        const out = await r.json().catch(() => ({}));
+        if (!r.ok) { toast(out.error || 'Please try again.'); break; }
+        await sb.auth.signOut().catch(() => {});
+        local('circle', null); local('invite', null);
+        location.hash = ''; location.reload();
         break;
       }
       case 'story-add': {
@@ -2976,6 +2998,7 @@ async function buildFrame() {
   el.addEventListener('click', closeFrame);
   document.body.appendChild(el);
   frame.el = el;
+  toNative({ type: 'awake', on: true });
   keepAwake();
   await showSlide();
   frame.timer = setInterval(showSlide, 12000);
@@ -2995,6 +3018,7 @@ function closeFrame() {
   clearInterval(frame.timer);
   frame.el.remove();
   frame.el = null;
+  toNative({ type: 'awake', on: false });
   if (frame.wake) { frame.wake.release().catch(() => {}); frame.wake = null; }
   frame.lastActivity = Date.now();
   render();
@@ -3044,6 +3068,36 @@ async function showSlide() {
   stage.appendChild(layer);
   requestAnimationFrame(() => requestAnimationFrame(() => layer.classList.add('on')));
   setTimeout(() => old.forEach((o) => o.remove()), 2200);
+}
+
+// ================================================================ iPhone app bridge
+// Inside the iPhone app (ios/), the page can ask the phone to schedule reminders that fire
+// even when the app is closed, and to keep the screen on for the picture frame.
+const nativeApp = !!(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.mc);
+const toNative = (msg) => { try { if (nativeApp) window.webkit.messageHandlers.mc.postMessage(msg); } catch { /* ignore */ } };
+let nativeSig = '';
+async function syncNativeReminders() {
+  if (!nativeApp || myRole !== 'device' || !circleId) return;
+  const [tasks, meds, events] = await Promise.all([all('tasks'), all('meds'), all('events')]);
+  const hm = (t) => { const [h, m] = String(t || '').split(':').map(Number); return Number.isFinite(h) && Number.isFinite(m) ? { hour: h, minute: m } : null; };
+  const items = [];
+  for (const t of tasks) { const x = hm(t.time); if (x) items.push({ id: `task-${t.id}`, title: `${t.icon || '⏰'} ${t.title}`, body: 'Tap to open your day.', ...x, repeats: true, route: '#day' }); }
+  for (const m of meds) for (const time of m.times || []) {
+    const x = hm(time); if (x) items.push({ id: `med-${m.id}-${time}`, title: `💊 Time to take ${m.name}`, body: m.dose || 'Tap when you have taken it.', ...x, repeats: true, route: '#meds' });
+  }
+  const soon = Date.now() + 30 * 86400000;
+  for (const e of events) {
+    const at = e.time ? new Date(`${e.date}T${e.time}`) : null;
+    if (!at || isNaN(at) || at.getTime() < Date.now() || at.getTime() > soon) continue;
+    const remind = new Date(at.getTime() - 60 * 60 * 1000);
+    items.push({ id: `event-${e.id}`, title: `📅 ${e.title}`, body: `At ${fmtHM(e.time)}.`, date: { year: remind.getFullYear(), month: remind.getMonth() + 1, day: remind.getDate(), hour: remind.getHours(), minute: remind.getMinutes() }, repeats: false, route: '#calendar' });
+  }
+  if (settings.evening?.on) items.push({ id: 'evening', title: 'Good evening 🌙', body: 'Tap to hear a message from your family.', hour: Number(settings.evening.start) || 16, minute: 0, repeats: true, route: '#home' });
+  const list = items.slice(0, 60); // iPhones keep at most 64 scheduled reminders per app
+  const sig = JSON.stringify(list);
+  if (sig === nativeSig) return;
+  nativeSig = sig;
+  toNative({ type: 'schedule', items: list });
 }
 
 let timersStarted = false;
