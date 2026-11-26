@@ -1,0 +1,11 @@
+{
+  "name": "Memory Companion",
+  "short_name": "Companion",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#f4eee3",
+  "theme_color": "#2d4a6a",
+  "icons": [
+    { "src": "assets/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

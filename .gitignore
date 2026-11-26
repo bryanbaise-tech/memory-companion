@@ -1,0 +1,4 @@
+.elevenlabs-key
+.voice-cache/
+.DS_Store
+.supabase-token
