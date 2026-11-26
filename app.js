@@ -90,6 +90,7 @@ let pendingRender = false;
 function softRender() {
   if ($app.querySelector('.player iframe')) { pendingRender = true; return; } // a song is playing
   if (typeof rec !== 'undefined' && (rec.recorder || rec.blob)) { pendingRender = true; return; } // recording in progress
+  if (typeof vn !== 'undefined' && vn.recorder) { pendingRender = true; return; } // a voice note is being recorded
   const a = document.activeElement;
   if (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && a.closest('#app')) { pendingRender = true; return; }
   clearTimeout(softRender.t);
@@ -427,14 +428,14 @@ async function mediaUrl(id) {
   return data.signedUrl;
 }
 function forgetUrl(id) { urlCache.delete(id); }
-async function saveMedia(file, caption = '', hidden = false, from = shortName(myName)) {
+async function saveMedia(file, caption = '', hidden = false, from = shortName(myName), extra = {}) {
   const id = uid();
   const ext = String(file.name || '').split('.').pop().toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 5);
   const path = `${circleId}/${id}${ext ? '.' + ext : ''}`;
   toast('Uploading…');
   const { error } = await sb.storage.from('media').upload(path, file, { contentType: file.type || undefined, upsert: false });
   if (error) throw new Error(/exceed|too large|size/i.test(error.message) ? 'That file is too big (50 MB max).' : error.message);
-  await put('media', { id, path, type: file.type || '', caption, hidden, from: shortName(from), at: Date.now() });
+  await put('media', { id, path, type: file.type || '', caption, hidden, from: shortName(from), at: Date.now(), ...extra });
   return id;
 }
 const isVideo = (m) => (m.type || '').startsWith('video/');
@@ -463,7 +464,7 @@ async function galleryItems() {
   return (await all('media')).filter((m) => !m.hidden && !isAudio(m)).sort((a, b) => b.at - a.at);
 }
 async function songs() {
-  return (await all('media')).filter(isAudio).sort((a, b) => (a.caption || '').localeCompare(b.caption || ''));
+  return (await all('media')).filter((m) => isAudio(m) && m.kind !== 'voice-note').sort((a, b) => (a.caption || '').localeCompare(b.caption || ''));
 }
 
 // ================================================================ settings & seed
@@ -860,12 +861,12 @@ async function viewMessages() {
   return topbar('Messages') + rows.join('');
 }
 
-const QUICK_REPLIES = ['I love you ❤️', 'Thank you! 😊', 'Please call me 📞', 'Okay 👍'];
+const QUICK_REPLIES = ['I love you ❤️', 'Thank you! 😊', 'Please call me 📞', 'Okay 👍', 'I miss you 🤗'];
 
 async function viewMessage(id) {
   const m = await get('messages', id);
   if (!m) return viewMessages();
-  if (!m.read) { m.read = true; await put('messages', m); }
+  await markSeen('messages', m);
   let mediaHtml = '';
   if (m.mediaId) {
     const media = await get('media', m.mediaId);
@@ -876,7 +877,6 @@ async function viewMessage(id) {
         : `<img src="${url}" alt="${esc(media.caption || 'Photo from ' + m.from)}">`}</div>`;
     }
   }
-  const replies = (m.replies || []).map((r) => `<div class="reply">You replied: <strong>${esc(r.text)}</strong> · ${fmtWhen(r.at)}</div>`).join('');
   return topbar('', '#messages', 'Messages') + `
     <article class="paper letter">
       <div class="kicker">From</div>
@@ -888,9 +888,9 @@ async function viewMessage(id) {
     </article>
     <div class="paper">
       <div class="section-label">Send a reply</div>
-      <div class="reply-grid">${QUICK_REPLIES.map((r) =>
+      ${replyBar('messages', m)}
+      <div class="reply-grid">${QUICK_REPLIES.filter((r) => !r.startsWith('I love')).map((r) =>
         `<button class="btn big" data-action="reply" data-id="${m.id}" data-text="${esc(r)}">${esc(r)}</button>`).join('')}</div>
-      <div class="replies">${replies}</div>
     </div>`;
 }
 
@@ -899,6 +899,7 @@ async function viewPhotos() {
   if (!items.length) return topbar('Photos') + empty('photo', 'No photos yet.', 'Your family can add photos and videos in Family settings.');
   const seen = photosSeen();
   local('photosSeen', Date.now());
+  if (myRole === 'device') await Promise.all(items.filter((m) => !m.seenAt).map((m) => markSeen('media', m)));
   const cards = await Promise.all(items.map(async (m) => {
     const url = await mediaUrl(m.id);
     return `<a class="thumb" href="#photo/${m.id}"><div class="frame">${isVideo(m)
@@ -915,6 +916,7 @@ async function viewPhoto(id) {
   const i = items.findIndex((m) => m.id === id);
   if (i < 0) return viewPhotos();
   const m = items[i];
+  await markSeen('media', m);
   const url = await mediaUrl(m.id);
   const prev = items[i - 1], next = items[i + 1];
   return topbar('', '#photos', 'All photos') + `
@@ -927,12 +929,107 @@ async function viewPhoto(id) {
       ${m.caption ? `<div class="caption">${esc(m.caption)}</div>` : ''}
       ${m.from ? '' : `<div class="msg-when">Added ${fmtWhen(m.at)}</div>`}
       ${m.caption || m.from ? `<div class="btn-row">${speakBtn([m.from ? `${shortName(m.from)} sent you this.` : '', m.caption].filter(Boolean).join(' '))}</div>` : ''}
+      ${m.from ? replyBar('media', m) : ''}
       <div class="nav">
         ${prev ? `<a class="btn big" href="#photo/${prev.id}">‹ Newer</a>` : '<span></span>'}
         ${next ? `<a class="btn big" href="#photo/${next.id}">Older ›</a>` : '<span></span>'}
       </div>
     </div>`;
 }
+
+// ================================================================ Mom can reply
+// Replies live on the photo or message they answer: { kind: 'heart'|'text'|'voice', by, at, text?, mediaId? }.
+const lovedOneName = () => settings.name || 'Mom';
+const replyBy = () => (myRole === 'device' ? lovedOneName() : shortName(myName) || 'Family');
+async function addReply(store, id, r) {
+  const item = await get(store, id);
+  if (!item) return;
+  item.replies = [...(item.replies || []), { ...r, by: replyBy(), at: Date.now() }];
+  await put(store, item);
+}
+// Only the loved one's own device marks things as seen, so family viewing her screen doesn't.
+async function markSeen(store, item) {
+  if (myRole !== 'device' || !item) return;
+  if (store === 'media' && !item.seenAt) { item.seenAt = Date.now(); await put('media', item); }
+  if (store === 'messages' && !item.read) { item.read = true; item.readAt = Date.now(); await put('messages', item); }
+}
+function replyBar(store, item) {
+  const reps = item.replies || [];
+  const loved = reps.some((r) => r.kind === 'heart');
+  const to = shortName(item.from) || 'your family';
+  const sent = reps.slice(-3).map((r) => `<div class="reply">${r.kind === 'heart' ? 'You sent a ❤️'
+    : r.kind === 'voice' ? '🎤 You sent a voice message' : `You replied: <strong>${esc(r.text)}</strong>`} · ${fmtWhen(r.at)}</div>`).join('');
+  return `<div class="reply-box">
+      <div class="reply-bar">
+        <button class="btn big heart${loved ? ' on' : ''}" data-action="heart" data-store="${store}" data-id="${item.id}"${loved ? ' disabled' : ''}>${loved ? '❤️ You loved this' : '❤️ Love it'}</button>
+        <button class="btn big" data-action="vnote" data-store="${store}" data-id="${item.id}">🎤 Say something</button>
+      </div>
+      <p class="hint reply-to">${esc(to)} will see it.</p>
+      ${sent}
+    </div>`;
+}
+
+const vn = { recorder: null, chunks: [], stream: null, started: 0, timer: null, cancelled: false };
+function voiceOverlay(state, to) {
+  $overlay.hidden = false;
+  $overlay.innerHTML = state === 'sending'
+    ? `<div class="ov-card vn-card"><div class="ov-ic">📨</div><div class="ov-what">Sending…</div></div>`
+    : `<div class="ov-card vn-card">
+        <div class="vn-dot" aria-hidden="true"></div>
+        <div class="ov-what">I'm listening</div>
+        <div class="ov-sub">Say anything to ${esc(to)}. Tap the button when you're done.</div>
+        <div class="vn-time" id="vn-time">0:00</div>
+        <div class="ov-actions">
+          <button class="btn good big" data-action="vnote-stop">✓ Done — send it</button>
+          <button class="btn ghost" data-action="vnote-cancel">Cancel</button>
+        </div></div>`;
+}
+async function startVoiceNote(store, id) {
+  const item = await get(store, id);
+  if (!item || vn.recorder) return;
+  const to = shortName(item.from) || 'your family';
+  try {
+    vn.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+  } catch {
+    toast('Please allow the microphone so you can send a voice message.');
+    return;
+  }
+  const type = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm'].find((t) => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || '';
+  vn.chunks = []; vn.cancelled = false;
+  vn.recorder = new MediaRecorder(vn.stream, type ? { mimeType: type } : undefined);
+  vn.recorder.ondataavailable = (e) => { if (e.data && e.data.size) vn.chunks.push(e.data); };
+  vn.recorder.onstop = async () => {
+    clearInterval(vn.timer);
+    vn.stream.getTracks().forEach((t) => t.stop());
+    const mime = vn.recorder.mimeType || type || 'audio/webm';
+    const secs = Math.max(1, Math.round((Date.now() - vn.started) / 1000));
+    vn.recorder = null;
+    if (vn.cancelled || !vn.chunks.length) { hideOverlay(); flushRender(); return; }
+    voiceOverlay('sending');
+    try {
+      const file = new File([new Blob(vn.chunks, { type: mime })], `voice.${mime.includes('mp4') ? 'm4a' : 'webm'}`, { type: mime });
+      const mediaId = await saveMedia(file, '', true, replyBy(), { kind: 'voice-note', secs });
+      await addReply(store, id, { kind: 'voice', mediaId, secs });
+      hideOverlay();
+      toast(`Sent to ${to} ✓`);
+      speak(`Your message is on its way to ${to}.`);
+    } catch (err) {
+      console.error(err);
+      hideOverlay();
+      toast('Sorry, that did not send. Please try again.');
+    }
+    flushRender();
+  };
+  vn.recorder.start(1000);
+  vn.started = Date.now();
+  voiceOverlay('recording', to);
+  vn.timer = setInterval(() => {
+    const sec = Math.round((Date.now() - vn.started) / 1000);
+    const t = document.getElementById('vn-time'); if (t) t.textContent = `${Math.floor(sec / 60)}:${pad(sec % 60)}`;
+    if (sec >= 90 && vn.recorder) vn.recorder.stop(); // keep it short and simple
+  }, 500);
+}
+function flushRender() { render(); }
 
 const telOf = (p) => (p.phone || '').replace(/[^\d+]/g, '');
 
@@ -1390,8 +1487,7 @@ async function careActivity() {
   const now = nowHM();
   const done = items.filter((t) => doneMap.has(t.key));
   const missed = items.filter((t) => !doneMap.has(t.key) && t.time <= now && t.kind !== 'event');
-  const replies = msgs.flatMap((m) => (m.replies || []).map((r) => ({ ...r, to: m.from })))
-    .sort((a, b) => b.at - a.at).slice(0, 10);
+  const feed = await lovedOneFeed(msgs);
   const unread = msgs.filter((m) => !m.read).length;
   let pairPrompt = '';
   if (myRole === 'family') {
@@ -1420,10 +1516,52 @@ async function careActivity() {
       ${done.length ? done.map((t) => `<div class="list-item"><span>${esc(t.icon)} ${esc(t.title)}</span><span class="meta">at ${fmtClock(new Date(doneMap.get(t.key).at))}</span></div>`).join('')
         : '<p class="hint">Nothing checked off yet.</p>'}
     </div>
-    <div class="paper"><h2>Recent replies</h2>
-      ${replies.length ? replies.map((r) => `<div class="list-item"><span>${esc(r.text)} <span class="meta">→ ${esc(r.to)}</span></span><span class="meta">${fmtWhen(r.at)}</span></div>`).join('')
-        : '<p class="hint">No replies yet.</p>'}
-    </div>`;
+    ${feed}`;
+}
+
+// Hearts, replies, voice messages and "saw it" from the loved one, newest first.
+let feedBaseline = null;
+async function lovedOneFeed(msgs) {
+  const media = await all('media');
+  const who = lovedOneName();
+  const events = [];
+  for (const m of msgs) {
+    for (const r of m.replies || []) events.push({ ...r, to: shortName(m.from), what: 'message', about: m.text, link: null });
+    if (m.readAt) events.push({ kind: 'seen', at: m.readAt, to: shortName(m.from), what: 'message', about: m.text, n: 1 });
+  }
+  const seenGroups = new Map();
+  for (const m of media.filter((x) => x.kind !== 'voice-note')) {
+    const what = isVideo(m) ? 'video' : 'photo';
+    for (const r of m.replies || []) events.push({ ...r, to: shortName(m.from), what, about: m.caption, thumb: m.id });
+    if (m.seenAt && m.from) {
+      const k = `${shortName(m.from)}|${Math.floor(m.seenAt / 600000)}`; // photos seen in the same few minutes count as one
+      const g = seenGroups.get(k) || { kind: 'seen', at: m.seenAt, to: shortName(m.from), what: 'photo', n: 0, thumb: m.id };
+      g.n += 1; g.at = Math.max(g.at, m.seenAt); seenGroups.set(k, g);
+    }
+  }
+  events.push(...seenGroups.values());
+  events.sort((a, b) => b.at - a.at);
+  // "New" means since the last visit before this page was opened, so live re-renders don't clear it.
+  if (feedBaseline === null) feedBaseline = local('feedSeen') || 0;
+  const lastLook = feedBaseline;
+  local('feedSeen', Date.now());
+  const top = events.slice(0, 15);
+  const fresh = top.filter((e) => e.at > lastLook && e.kind !== 'seen').length;
+  const rows = await Promise.all(top.map(async (e) => {
+    const by = e.by || who;
+    const about = e.about ? ` <span class="meta">“${esc(e.about.slice(0, 40))}${e.about.length > 40 ? '…' : ''}”</span>` : '';
+    const line = e.kind === 'heart' ? `❤️ <b>${esc(by)}</b> loved your ${e.what}${about}`
+      : e.kind === 'voice' ? `🎤 <b>${esc(by)}</b> sent a voice message${about ? ' about' + about : ''}`
+      : e.kind === 'seen' ? `👀 <b>${esc(who)}</b> saw your ${e.n > 1 ? e.n + ' ' + e.what + 's' : e.what}${e.n > 1 ? '' : about}`
+      : `💬 <b>${esc(by)}</b> replied “${esc(e.text || '')}”${about ? ' to' + about : ''}`;
+    const thumb = e.thumb ? `<img class="mini-thumb" src="${await mediaUrl(e.thumb)}" alt="">` : '';
+    const audio = e.kind === 'voice' && e.mediaId ? `<audio class="feed-audio" controls preload="none" src="${await mediaUrl(e.mediaId)}"></audio>` : '';
+    return `<div class="feed-item${e.at > lastLook && e.kind !== 'seen' ? ' fresh' : ''}">${thumb}
+      <div class="feed-body"><div>${line}</div>${audio}
+        <div class="meta">${e.to ? `to ${esc(e.to)} · ` : ''}${fmtWhen(e.at)}</div></div></div>`;
+  }));
+  return `<div class="paper"><h2>From ${esc(who)}${fresh ? ` <span class="new-pill">${fresh} new</span>` : ''}</h2>
+    ${rows.length ? rows.join('') : `<p class="hint">When ${esc(who)} loves a photo, sends a voice message or replies, it shows up here.</p>`}</div>`;
 }
 
 const ICONS = ['🍳', '🥪', '🍽️', '💧', '🚶', '🛏️', '🚿', '🪥', '👕', '📞', '🩺', '🧩', '📺', '🌱', '🐕', '🗑️', '🍵', '⭐'];
@@ -1517,7 +1655,7 @@ async function careMessages() {
     <div class="paper"><h2>Sent messages</h2>
       ${msgs.length ? msgs.map((m) => `
         <div class="list-item"><span><strong>${esc(m.from)}</strong>: ${esc(m.text.slice(0, 60))}${m.text.length > 60 ? '…' : ''}
-          <br><span class="meta">${fmtWhen(m.at)} · ${m.read ? 'Read ✓' : 'Not read yet'}${(m.replies || []).length ? ` · ${m.replies.length} repl${m.replies.length > 1 ? 'ies' : 'y'}` : ''}</span></span>
+          <br><span class="meta">${fmtWhen(m.at)} · ${m.read ? `Read ✓${m.readAt ? ' ' + fmtWhen(m.readAt) : ''}` : 'Not read yet'}${(m.replies || []).some((r) => r.kind === 'heart') ? ' · ❤️' : ''}${(m.replies || []).length ? ` · ${m.replies.length} repl${m.replies.length > 1 ? 'ies' : 'y'}` : ''}</span></span>
         <button class="btn small danger" data-action="msg-del" data-id="${m.id}">Delete</button></div>`).join('')
         : '<p class="hint">No messages yet.</p>'}
     </div>`;
@@ -1529,7 +1667,7 @@ async function carePhotos() {
     const url = await mediaUrl(m.id);
     return `<div class="list-item">
       ${isVideo(m) ? `<video class="mini-thumb" src="${url}#t=0.5" muted preload="metadata"></video>` : `<img class="mini-thumb" src="${url}" alt="">`}
-      ${m.from ? `<span class="hint" style="flex:none">from ${esc(shortName(m.from))}</span>` : ''}
+      <span class="hint" style="flex:none">${m.from ? `from ${esc(shortName(m.from))}<br>` : ''}${m.seenAt ? 'Seen ✓' : 'Not seen yet'}${(m.replies || []).some((r) => r.kind === 'heart') ? ' · ❤️' : ''}</span>
       <form class="row" data-form="caption-save" data-id="${m.id}" style="flex:1">
         <input type="text" name="caption" value="${esc(m.caption)}" placeholder="Add a caption" maxlength="120">
         <button class="btn small" type="submit" style="flex:none">Save</button>
@@ -1836,13 +1974,24 @@ document.addEventListener('click', async (e) => {
     case 'done': await completeItem(id); break;
     case 'undo': await del('completions', `${dayKey()}:${id}`); render(); break;
     case 'reply': {
-      const m = await get('messages', id);
-      m.replies = [...(m.replies || []), { text, at: Date.now() }];
-      await put('messages', m);
+      await addReply('messages', id, { kind: 'text', text });
       toast('Reply sent ✓');
       render();
       break;
     }
+    case 'heart': {
+      const store = el.dataset.store;
+      const item = await get(store, id);
+      if (!item || (item.replies || []).some((r) => r.kind === 'heart')) break;
+      await addReply(store, id, { kind: 'heart' });
+      toast(`❤️ Sent to ${shortName(item.from) || 'your family'}`);
+      speak(`${shortName(item.from) || 'Your family'} will know you loved it.`);
+      render();
+      break;
+    }
+    case 'vnote': await startVoiceNote(el.dataset.store, id); break;
+    case 'vnote-stop': if (vn.recorder) vn.recorder.stop(); break;
+    case 'vnote-cancel': if (vn.recorder) { vn.cancelled = true; vn.recorder.stop(); } break;
     case 'song': await toggleSong(id, el); break;
     case 'care-lock': session('care', null); location.hash = '#home'; break;
     case 'task-del': if (confirm('Remove this task?')) { await del('tasks', id); render(); } break;
@@ -2200,7 +2349,7 @@ function hideOverlay() {
 }
 
 async function checkReminders() {
-  if (overlayKey || session('care') === '1' || myRole !== 'device') return;
+  if (overlayKey || !$overlay.hidden || session('care') === '1' || myRole !== 'device') return; // never interrupt a voice message
   const { items, doneMap } = await todayItems();
   const now = new Date();
   const hm = nowHM(now);
