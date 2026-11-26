@@ -484,6 +484,7 @@ const DEFAULTS = {
   city: '', lat: null, lon: null, place: '', units: 'fahrenheit', helpPersonId: '',
   about: { fullName: '', address: '', birthday: '', phone: '', facts: '' },
   frame: { on: true, idleMin: 3 },
+  evening: { on: true, start: 16, message: '', song: '' },
 };
 let settings = structuredClone(DEFAULTS);
 
@@ -518,7 +519,8 @@ async function seedExamples(includeBasics) {
 
 function mergeSettings(s) {
   return { ...structuredClone(DEFAULTS), ...(s || {}), about: { ...DEFAULTS.about, ...((s && s.about) || {}) },
-    frame: { ...DEFAULTS.frame, ...((s && s.frame) || {}) } };
+    frame: { ...DEFAULTS.frame, ...((s && s.frame) || {}) },
+    evening: { ...DEFAULTS.evening, ...((s && s.evening) || {}) } };
 }
 async function loadSettings() {
   const s = storeOf('settings').get('main');
@@ -782,6 +784,8 @@ async function viewHome() {
       </div>
       ${heroPic ? '' : `<div class="greet">${esc(greet)}</div>`}
     </header>
+
+    ${await eveningCard()}
 
     ${facesHtml}
 
@@ -1422,6 +1426,7 @@ async function careVoices() {
       <label>"Read me the day" <select name="day">${options(n.day)}</select></label>
       <label>Reminders <select name="reminder">${options(n.reminder)}</select></label>
       <label>Messages <span class="hint">(a message can also be set to its sender's voice when it's sent)</span><select name="message">${options(n.message)}</select></label>
+      <label>The evening message <select name="evening">${options(n.evening || n.other)}</select></label>
       <label>Everything else <select name="other">${options(n.other)}</select></label>
       <button class="btn primary" type="submit">Save</button>
     </form>
@@ -1893,6 +1898,14 @@ function careVoice() {
     </form>`;
 }
 
+async function eveningSongOptions() {
+  const sel = settings.evening?.song || '';
+  const links = await all('music');
+  const files = await songs();
+  return `<option value="" ${!sel ? 'selected' : ''}>The first song in Music</option>
+    ${links.map((m) => `<option value="link:${esc(m.id)}" ${sel === 'link:' + m.id ? 'selected' : ''}>${esc(m.title || 'Song')}</option>`).join('')}
+    ${files.map((m) => `<option value="song:${esc(m.id)}" ${sel === 'song:' + m.id ? 'selected' : ''}>${esc(m.caption || 'Song')}</option>`).join('')}`;
+}
 async function careSettings() {
   const scales = [[1, 'Large'], [1.15, 'Larger'], [1.3, 'Largest']];
   return `
@@ -1909,6 +1922,16 @@ async function careSettings() {
       <label>Start the picture frame after <select name="frameIdle">${[2, 3, 5, 10, 15].map((n) =>
         `<option value="${n}" ${Number(settings.frame?.idleMin) === n ? 'selected' : ''}>${n} minutes</option>`).join('')}</select></label>
       <button class="btn small" type="button" data-action="frame-open">▶ Preview the picture frame</button>
+      <h3 class="settings-sub">Evening calm</h3>
+      <label class="inline"><input type="checkbox" name="eveOn" ${settings.evening?.on ? 'checked' : ''}>
+        Warmer, calmer screen in the evening, with a reassuring message</label>
+      <label>Starts at <select name="eveStart">${[15, 16, 17, 18, 19].map((h) =>
+        `<option value="${h}" ${Number(settings.evening?.start) === h ? 'selected' : ''}>${h - 12}:00 pm</option>`).join('')}</select></label>
+      <label>A few words to add each evening <span class="hint">(optional, read aloud, e.g. "Sarah will call at 7. We love you.")</span>
+        <textarea name="eveMsg" maxlength="300" rows="2">${esc(settings.evening?.message || '')}</textarea></label>
+      <label>Evening music <select name="eveSong">${await eveningSongOptions()}</select></label>
+      <button class="btn small" type="button" data-action="evening-preview">🔊 Hear the evening message</button>
+      <p class="hint">Whose voice reads it is set in Voices → Who reads what.</p>
       <label>New family PIN <span class="hint">(leave blank to keep current)</span>
         <input type="password" name="pin" inputmode="numeric" minlength="4" maxlength="8" autocomplete="new-password"></label>
       <button class="btn primary" type="submit">Save settings</button>
@@ -1931,6 +1954,7 @@ async function careSettings() {
 let renderSeq = 0;
 async function render() {
   if (!circleId) return; // still signing in / pairing
+  applyEvening();
   const seq = ++renderSeq;
   const [r = 'home', param] = location.hash.slice(1).split('/');
   const views = {
@@ -2017,6 +2041,7 @@ document.addEventListener('click', async (e) => {
     }
     case 'vnote': await startVoiceNote(el.dataset.store, id); break;
     case 'frame-open': await openFrame(); break;
+    case 'evening-preview': speak(await eveningWords(), { purpose: 'evening' }); break;
     case 'vnote-stop': if (vn.recorder) vn.recorder.stop(); break;
     case 'vnote-cancel': if (vn.recorder) { vn.cancelled = true; vn.recorder.stop(); } break;
     case 'song': await toggleSong(id, el); break;
@@ -2230,7 +2255,7 @@ document.addEventListener('submit', async (e) => {
         break;
       }
       case 'narration-save': {
-        settings.narration = { day: fd.get('day'), reminder: fd.get('reminder'), message: fd.get('message'), other: fd.get('other') };
+        settings.narration = { day: fd.get('day'), reminder: fd.get('reminder'), message: fd.get('message'), evening: fd.get('evening'), other: fd.get('other') };
         await put('settings', settings);
         toast('Saved');
         speak('Hello. This is how I will read the day.', { purpose: 'day' });
@@ -2350,6 +2375,7 @@ document.addEventListener('submit', async (e) => {
         settings.scale = Number(fd.get('scale'));
         settings.voice = fd.get('voice') === 'on';
         settings.frame = { on: fd.get('frameOn') === 'on', idleMin: Number(fd.get('frameIdle')) || 3 };
+        settings.evening = { on: fd.get('eveOn') === 'on', start: Number(fd.get('eveStart')) || 16, message: val(fd, 'eveMsg').slice(0, 300), song: String(fd.get('eveSong') || '') };
         const pin = val(fd, 'pin');
         if (pin) {
           if (!/^\d{4,8}$/.test(pin)) { toast('PIN must be 4–8 digits'); break; }
@@ -2556,6 +2582,58 @@ async function enterCircle() {
   startTimers();
 }
 
+// ================================================================ evening calm
+// Late afternoon and evening can be the hardest time of day. From the hour the family
+// picks (default 4pm) until 9pm, the screen turns warmer and quieter, a calm card offers
+// a familiar voice and soothing music, and the loved one's phone says it once by itself.
+const isEvening = (d = new Date()) => !!settings.evening?.on && d.getHours() >= (Number(settings.evening.start) || 16) && !isNight(d);
+function applyEvening() { document.body.classList.toggle('evening', isEvening()); }
+async function eveningWords() {
+  const now = new Date();
+  const hm = nowHM(now);
+  const { items, doneMap } = await todayItems();
+  const lc = (t) => t.charAt(0).toLowerCase() + t.slice(1);
+  const later = items.filter((t) => !doneMap.has(t.key) && t.time >= hm);
+  const call = later.find((t) => t.kind === 'event');
+  const next = later.find((t) => t.kind !== 'event');
+  const parts = [`Good evening${settings.name ? ', ' + settings.name : ''}.`, "You're safe at home, and everything is taken care of."];
+  if (call) parts.push(`At ${fmtHM(call.time)}: ${call.title}.`);
+  else if (next) parts.push(`At ${fmtHM(next.time)}, it will be time to ${lc(next.title)}.`);
+  if (settings.evening?.message) parts.push(String(settings.evening.message).trim());
+  parts.push('Take it easy, and enjoy a quiet evening.');
+  return parts.join(' ');
+}
+// The family's chosen evening song, or the first song available.
+async function eveningSong() {
+  const links = await all('music');
+  const files = await songs();
+  const [kind, id] = String(settings.evening?.song || '').split(':');
+  const link = (kind === 'link' && links.find((m) => m.id === id)) || (!kind && links[0]);
+  const file = (kind === 'song' && files.find((m) => m.id === id)) || (!kind && !link && files[0]);
+  if (link) return `<a class="btn big" href="#music/${esc(link.id)}">🎵 Calming music</a>`;
+  if (file) return `<button class="btn big" data-action="song" data-id="${esc(file.id)}">🎵 Calming music</button>`;
+  return '';
+}
+async function eveningCard() {
+  if (!isEvening()) return '';
+  const words = await eveningWords();
+  return `<div class="paper evening-card">
+      <div class="ev-moon" aria-hidden="true"></div>
+      <div class="evening-title">A calm evening</div>
+      <p class="evening-text">${esc(words)}</p>
+      <div class="btn-row">
+        <button class="btn big" data-action="speak" data-purpose="evening" data-text="${esc(words)}">${icon('speak')} Hear it</button>
+        ${await eveningSong()}
+      </div>
+    </div>`;
+}
+async function maybeSayEvening() {
+  if (myRole !== 'device' || !isEvening() || local('eveningSaid') === dayKey()) return;
+  if (vn.recorder || nowPlaying || !$overlay.hidden) return;
+  local('eveningSaid', dayKey());
+  speak(await eveningWords(), { purpose: 'evening' });
+}
+
 // ================================================================ picture-frame mode
 // After a few quiet minutes on the loved one's phone, it becomes a picture frame:
 // family photos with a big clock, her garden now and then, and a calm dark clock at night.
@@ -2660,6 +2738,8 @@ function startTimers() {
     document.querySelectorAll('[data-clock]').forEach((el) => { el.textContent = fmtClock(new Date()); });
     if (dayKey() !== lastDay) { lastDay = dayKey(); render(); }
     checkReminders();
+    applyEvening();
+    maybeSayEvening();
     if (frameShouldStart()) openFrame();
   }, 20 * 1000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) { softRender(); checkReminders(); } });

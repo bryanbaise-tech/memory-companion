@@ -49,11 +49,10 @@ model here.
 Done: shared backend, family voices, music links, who-sent-it labels on photos,
 the new photo-and-faces look, the growing flower and garden, Mom can reply
 (hearts, voice messages, seen/read), the pairing security fixes, and
-picture-frame mode (photos, garden, night clock).
+picture-frame mode (photos, garden, night clock), and evening calm mode.
 
-1. **Evening calm mode**: warmer screen, music and a familiar voice from late afternoon.
-2. **Life story** and "On this day."
-3. **Native iPhone milestone**, done as one piece:
+1. **Life story** and "On this day."
+2. **Native iPhone milestone**, done as one piece:
    - a Swift app that wraps the web app, with the web files bundled inside so it opens offline
    - real notifications, including "Mom missed her pills" alerts to family and
      a happy "Mom's flower bloomed today 🌸" note
@@ -64,7 +63,7 @@ picture-frame mode (photos, garden, night clock).
      "delete what I shared"; deleting the whole family circle removes everything.
      Decided: use this rule. Deleting a circle must also delete media/<circle_id>/*
      in storage on the server side (today only the app's reset button does it).
-4. **App Store** release, which needs the Apple Developer Program ($99 a year).
+3. **App Store** release, which needs the Apple Developer Program ($99 a year).
 
 ### Security follow-ups (from the second outside review)
 
