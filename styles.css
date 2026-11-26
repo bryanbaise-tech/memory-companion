@@ -401,7 +401,7 @@ textarea { min-height: 6rem; resize: vertical; }
 .pill-ok { display: inline-block; vertical-align: middle; margin-left: .4rem; font-family: var(--sans); font-size: .72rem; font-weight: 700; letter-spacing: .04em; background: var(--matcha-soft); color: var(--matcha); border-radius: 999px; padding: .15rem .6rem; }
 
 /* ---------- Sign-in, pairing & family ---------- */
-.welcome-hero { padding-bottom: 5.5rem; }
+.welcome-hero { min-height: 0; justify-content: flex-start; gap: .9rem; }
 .wide { width: 100%; }
 .stack-gap { display: grid; gap: .8rem; }
 .code-input { text-align: center; font-size: 1.8rem !important; letter-spacing: .3em; font-family: var(--serif); }
@@ -606,3 +606,7 @@ body.evening .plant .sway { animation-duration: 9s; }
 .btn-row.flush { margin-top: 0; }
 .embed-spotify { height: 352px; } .embed-spotify-tall { height: 452px; }
 .embed-apple { height: 175px; } .embed-apple-tall { height: 450px; }
+
+.welcome-mark { width: 4.2rem; height: 4.2rem; border-radius: 1.1rem; background: linear-gradient(180deg, #c9674a, #a34e36); display: grid; place-items: center; box-shadow: var(--shadow); }
+.welcome-mark svg { width: 80%; height: 80%; fill: #fbf2e9; }
+.hero .season { font-size: .85rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; opacity: .75; }

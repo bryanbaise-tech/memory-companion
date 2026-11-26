@@ -2789,18 +2789,11 @@ async function setupEleven() {
 }
 
 // ================================================================ sign-in & pairing screens
-const welcomeHero = (title, sub) => {
-  const part = partOfDay();
-  return `
-    <header class="hero sky-${part} welcome-hero">
-      <div class="sun" aria-hidden="true"></div>
-      <svg class="hills" viewBox="0 0 400 110" preserveAspectRatio="none" aria-hidden="true">
-        <path class="h1" d="M0 70 C50 40 95 45 140 62 C185 78 220 30 280 38 C330 45 365 60 400 52 V110 H0Z"/>
-        <path class="h2" d="M0 90 C60 72 120 80 190 90 C260 100 320 74 400 84 V110 H0Z"/>
-      </svg>
+const welcomeHero = (title, sub) => `
+    <header class="hero sky-${partOfDay()} welcome-hero">
+      <div class="welcome-mark" aria-hidden="true"><svg viewBox="0 0 64 64"><path d="M32 47s-14-8.6-14-18.2C18 24 21.4 21 25.2 21c2.8 0 5 1.6 6.8 4 1.8-2.4 4-4 6.8-4C42.6 21 46 24 46 28.8 46 38.4 32 47 32 47z"/></svg></div>
       <div class="hero-text"><div class="season">Memory Companion</div><div class="day">${esc(title)}</div><div class="greet">${esc(sub)}</div></div>
     </header>`;
-};
 function showWelcome() {
   $app.innerHTML = welcomeHero('Welcome', 'A calm daily companion, shared with family.') + `
     <div class="paper stack-gap">
