@@ -74,12 +74,20 @@ media types restricted, daily warm-voice allowance, voice and sample-size caps, 
 circle deletion (files + cloned voices), 1-hour signed links, JWT-verified functions,
 last-family-member guard, nightly cleanup of tombstones and unpaired anonymous accounts.
 
+Third review (done): deleted items keep their content and stay deleted (family can restore
+for 30 days), rows can't be moved or renamed, phones reload after sleep, 128-bit link tokens
+(no per-family lockout), voices capped in the database, orphan-proof voice create/delete,
+per-voice clip cache with 90-day expiry, CSP on both pages, verified senders ("Joe (sent by
+Bryan)"), coerced settings, explicit image types, per-family row and file quotas, nightly
+housekeeping function for files.
+
 Still to do:
 - Turn on CAPTCHA (Cloudflare Turnstile) for anonymous sign-ins in the Supabase dashboard,
   then pass the token from the pairing screen.
 - Server-verified family PIN (hash in a no-grant table, rate-limited unlock that opens a
-  30-minute window for device writes to family data). Today the PIN is a screen lock only.
-- Expire old cached voice clips in the private "voice" bucket.
+  30-minute window for device writes to family data). Today the PIN is a courtesy screen
+  lock only: the loved one's device can read it, so it is not a security boundary.
 - Optional: store replies and "seen" marks as their own rows stamped by the server, if they
   ever need to be proof rather than a friendly signal.
+- Optional: key the warm-voice daily allowance by family as well as by person.
 

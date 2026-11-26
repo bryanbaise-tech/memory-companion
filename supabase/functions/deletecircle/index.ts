@@ -23,8 +23,12 @@ Deno.serve(async (req) => {
   if (!user) return json({ error: "Please sign in" }, 401);
 
   let circleId = "";
-  try { circleId = String((await req.json()).circleId || ""); } catch { return json({ error: "Bad request" }, 400); }
+  try {
+    const body = await req.json();
+    circleId = String((body && typeof body === "object" && body.circleId) || "");
+  } catch { return json({ error: "Bad request" }, 400); }
   if (!UUID.test(circleId)) return json({ error: "Bad request" }, 400);
+  circleId = circleId.toLowerCase(); // storage paths are case-sensitive
   const { data: m } = await admin.from("members").select("role").eq("circle_id", circleId).eq("user_id", user.id).maybeSingle();
   if (!m || m.role !== "family") return json({ error: "Only family members can delete the care circle" }, 403);
 
@@ -46,13 +50,27 @@ Deno.serve(async (req) => {
     return json({ error: "Couldn't delete the photos just now. Nothing else was deleted; please try again." }, 502);
   }
 
-  // 2) Cloned voices in ElevenLabs.
+  // 2) Cloned voices in ElevenLabs, and their cached clips. Stop if any can't be removed,
+  //    so no clone is left behind without a record (step 1 is safe to repeat).
   const key = Deno.env.get("ELEVENLABS_API_KEY");
   const { data: voices } = await admin.from("voices").select("voice_id").eq("circle_id", circleId);
-  if (key) {
-    for (const v of voices || []) {
-      const r = await fetch(`https://api.elevenlabs.io/v1/voices/${v.voice_id}`, { method: "DELETE", headers: { "xi-api-key": key }, signal: AbortSignal.timeout(15000) });
-      if (!r.ok && r.status !== 404) console.error("ElevenLabs delete", v.voice_id, r.status);
+  const voicesFail = () => json({ error: "Couldn't remove the family voices just now. Photos were removed; please try again." }, 502);
+  if ((voices || []).length && !key) return voicesFail();
+  for (const v of voices || []) {
+    let ok = false;
+    try {
+      const r = await fetch(`https://api.elevenlabs.io/v1/voices/${v.voice_id}`, { method: "DELETE", headers: { "xi-api-key": key! }, signal: AbortSignal.timeout(15000) });
+      ok = r.ok || r.status === 404;
+      if (!ok) console.error("ElevenLabs delete", v.voice_id, r.status);
+    } catch (err) { console.error("ElevenLabs delete", v.voice_id, err); }
+    if (!ok) return voicesFail();
+    await admin.from("voices").delete().eq("voice_id", v.voice_id);
+    for (;;) {
+      const { data } = await admin.storage.from("voice").list(v.voice_id, { limit: 1000 });
+      const files = (data || []).filter((o) => o.id).map((o) => `${v.voice_id}/${o.name}`);
+      if (!files.length) break;
+      for (let i = 0; i < files.length; i += 100) await admin.storage.from("voice").remove(files.slice(i, i + 100));
+      if (files.length < 1000) break;
     }
   }
 

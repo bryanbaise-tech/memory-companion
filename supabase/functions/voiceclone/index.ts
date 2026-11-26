@@ -27,6 +27,17 @@ function friendly(status: number, detail: string) {
   return "ElevenLabs couldn't make the voice from that recording. Please try again.";
 }
 
+// Every cached clip of a voice lives under voice/<voiceId>/ (see speak).
+async function removeCachedClips(admin: ReturnType<typeof createClient>, voiceId: string) {
+  for (;;) {
+    const { data } = await admin.storage.from("voice").list(voiceId, { limit: 1000 });
+    const files = (data || []).filter((o) => o.id).map((o) => `${voiceId}/${o.name}`);
+    if (!files.length) return;
+    for (let i = 0; i < files.length; i += 100) await admin.storage.from("voice").remove(files.slice(i, i + 100));
+    if (files.length < 1000) return;
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Not found" }, 404);
@@ -36,10 +47,12 @@ Deno.serve(async (req) => {
   const { data: { user } } = await admin.auth.getUser(jwt);
   if (!user) return json({ error: "Please sign in" }, 401);
 
-  let body: { action?: string; circleId?: string; name?: string; paths?: string[]; voiceId?: string };
+  let body: { action?: string; circleId?: string; name?: string; paths?: unknown; voiceId?: string };
   try { body = await req.json(); } catch { return json({ error: "Bad request" }, 400); }
-  const circleId = String(body.circleId || "");
-  if (!UUID.test(circleId)) return json({ error: "Bad request" }, 400);
+  if (!body || typeof body !== "object" || Array.isArray(body)) return json({ error: "Bad request" }, 400);
+  const rawCircle = String(body.circleId || "");
+  if (!UUID.test(rawCircle)) return json({ error: "Bad request" }, 400);
+  const circleId = rawCircle.toLowerCase(); // storage paths are case-sensitive
   const { data: m } = await admin.from("members").select("role").eq("circle_id", circleId).eq("user_id", user.id).maybeSingle();
   if (!m || m.role !== "family") return json({ error: "Only family members can manage voices" }, 403);
 
@@ -56,6 +69,7 @@ Deno.serve(async (req) => {
       return json({ error: "Couldn't remove that voice just now. Please try again." }, 502);
     }
     await admin.from("voices").delete().eq("voice_id", voiceId);
+    await removeCachedClips(admin, voiceId);
     return json({ ok: true });
   }
 
@@ -66,13 +80,14 @@ Deno.serve(async (req) => {
   const name = String(body.name || "").trim().slice(0, 60) || "Family voice";
   // Exact shape only: <circle>/voice-samples/<id>.<ext>. No "..", "%" or "\" can get through.
   const shape = new RegExp(`^${circleId}/voice-samples/[a-z0-9]+\\.[a-z0-9]{1,5}$`);
-  const raw = (body.paths || []).map(String);
+  if (!Array.isArray(body.paths)) return json({ error: "Bad request" }, 400);
+  const raw = body.paths.map(String);
   if (raw.some((p) => !shape.test(p) || /\.\.|%|\\/.test(p))) return json({ error: "Bad recording path" }, 400);
   const paths = raw.slice(0, 5);
   if (!paths.length) return json({ error: "No recording found" }, 400);
 
   // Check sizes before downloading anything into memory.
-  const { data: listed } = await admin.storage.from("media").list(`${circleId}/voice-samples`, { limit: 100 });
+  const { data: listed } = await admin.storage.from("media").list(`${circleId}/voice-samples`, { limit: 1000 });
   const sizes = new Map((listed || []).map((o) => [`${circleId}/voice-samples/${o.name}`, Number((o.metadata as Record<string, unknown>)?.size || 0)]));
   if (paths.some((p) => !sizes.has(p))) return json({ error: "Couldn't find the recording. Please try again." }, 400);
   const total = paths.reduce((n, p) => n + (sizes.get(p) || 0), 0);
@@ -86,9 +101,15 @@ Deno.serve(async (req) => {
   form.append("name", `${name} · Memory Companion`);
   form.append("description", "Family voice recorded for Memory Companion, with permission.");
   form.append("remove_background_noise", "true");
+  let downloaded = 0;
   for (const [i, p] of paths.entries()) {
     const { data, error } = await admin.storage.from("media").download(p);
     if (error || !data) return json({ error: "Couldn't read the recording. Please try again." }, 400);
+    downloaded += data.size; // re-check: the file could have changed since it was listed
+    if (downloaded > MAX_SAMPLE_BYTES) {
+      await admin.storage.from("media").remove(paths);
+      return json({ error: "That recording is too large. About two minutes is plenty." }, 400);
+    }
     const ext = (p.split(".").pop() || "m4a").toLowerCase();
     form.append("files", new File([data], `sample-${i + 1}.${ext}`, { type: data.type || "audio/mpeg" }));
   }
@@ -104,6 +125,13 @@ Deno.serve(async (req) => {
     return json({ error: friendly(r.status, String(detail)) }, 502);
   }
   const d = JSON.parse(text);
-  await admin.from("voices").insert({ voice_id: d.voice_id, circle_id: circleId, created_by: user.id });
+  const { error: saveErr } = await admin.from("voices").insert({ voice_id: d.voice_id, circle_id: circleId, created_by: user.id });
+  if (saveErr) {
+    // Never leave a clone at ElevenLabs that no family owns: remove it again.
+    console.error("voices insert", saveErr.message);
+    await fetch(`https://api.elevenlabs.io/v1/voices/${d.voice_id}`, { method: "DELETE", headers: { "xi-api-key": key }, signal: AbortSignal.timeout(15000) }).catch(() => {});
+    const full = /6 voices/.test(saveErr.message);
+    return json({ error: full ? `This family already has ${MAX_VOICES_PER_CIRCLE} voices. Remove one first.` : "Couldn't save the voice. Please try again." }, full ? 400 : 502);
+  }
   return json({ voiceId: d.voice_id });
 });

@@ -24,8 +24,9 @@ const mem = new Map();  // store -> Map(id -> record): the whole circle, kept in
 function showProblem(text) {
   const el = document.getElementById('app');
   if (!el) return;
-  el.innerHTML = `<div class="paper problem"><h2>One moment</h2><p>${String(text).replace(/</g, '&lt;')}</p>
-    <button class="btn primary" onclick="location.reload()">Try again</button></div>`;
+  const safe = String(text).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  el.innerHTML = `<div class="paper problem"><h2>One moment</h2><p>${safe}</p>
+    <button class="btn primary" data-action="reload">Try again</button></div>`;
 }
 window.addEventListener('error', (e) => {
   console.error(e.error || e.message);
@@ -36,33 +37,113 @@ const storeOf = (s) => { if (!mem.has(s)) mem.set(s, new Map()); return mem.get(
 const copy = (o) => (o == null ? o : structuredClone(o));
 async function all(s) { return [...storeOf(s).values()].map(copy); }
 async function get(s, id) { return copy(storeOf(s).get(id)); }
+// Fields starting with "_" are local only (e.g. _by, who created the row); never saved.
+const stripLocal = (rec) => Object.fromEntries(Object.entries(rec).filter(([k]) => !k.startsWith('_')));
 async function put(s, obj) {
   const rec = copy(obj);
   storeOf(s).set(rec.id, rec);
-  const { error } = await sb.from('items').upsert({ circle_id: circleId, store: s, id: rec.id, data: rec, updated_at: new Date().toISOString() });
+  const { error } = await sb.from('items').upsert({ circle_id: circleId, store: s, id: rec.id, data: stripLocal(rec), updated_at: new Date().toISOString() });
   if (error) throw new Error(error.message);
   return rec.id;
 }
-// Deleting writes a tombstone instead of removing the row: the server never broadcasts
-// real deletes (they would skip row-level security), and purges tombstones after 30 days.
-const isTomb = (d) => !!(d && d.deleted);
+// Deleting marks the row deleted and keeps its content for 30 days, so family can restore it
+// (Settings → Recently deleted). The server never broadcasts real deletes (they would skip
+// row-level security), keeps a deleted row deleted even if a stale phone writes it again,
+// and removes it (and a photo's file) after 30 days.
+const isTomb = (d) => !!(d && d.deleted === true);
+const trash = new Map(); // "store:id" -> { store, id, data }
 async function del(s, id) {
   const rec = storeOf(s).get(id);
   storeOf(s).delete(id);
-  const { error } = await sb.from('items').upsert({ circle_id: circleId, store: s, id, data: { id, deleted: true, at: Date.now() }, updated_at: new Date().toISOString() });
+  const data = { ...stripLocal(rec || { id }), deleted: true, deletedAt: Date.now() };
+  trash.set(`${s}:${id}`, { store: s, id, data });
+  const { error } = await sb.from('items').upsert({ circle_id: circleId, store: s, id, data, updated_at: new Date().toISOString() });
   if (error) throw new Error(error.message);
-  if (s === 'media' && rec && rec.path && myRole === 'family') sb.storage.from('media').remove([rec.path]).catch(() => {});
+}
+async function restore(s, id) {
+  const t = trash.get(`${s}:${id}`);
+  if (!t) return;
+  const rec = { ...t.data };
+  delete rec.deleted; delete rec.deletedAt;
+  const { error } = await sb.from('items').upsert({ circle_id: circleId, store: s, id, data: { ...rec, restore: true }, updated_at: new Date().toISOString() });
+  if (error) throw new Error(error.message);
+  storeOf(s).set(id, rec);
+  trash.delete(`${s}:${id}`);
+}
+// One malformed row (any member can write any row) must not break a screen: text fields
+// are always strings, lists are always lists.
+const STR_FIELDS = ['title', 'name', 'caption', 'text', 'from', 'place', 'time', 'date', 'icon', 'dose', 'purpose', 'relation',
+  'phone', 'note', 'with', 'artist', 'url', 'thumb', 'path', 'type', 'provider', 'kind', 'photoId', 'mediaId', 'voiceId', 'taskId'];
+function norm(d) {
+  if (!d || typeof d !== 'object' || Array.isArray(d)) return { id: '' };
+  for (const k of STR_FIELDS) if (k in d && typeof d[k] !== 'string') d[k] = d[k] == null ? '' : String(d[k]);
+  if ('id' in d) d.id = String(d.id);
+  for (const k of ['times', 'replies']) if (k in d && !Array.isArray(d[k])) d[k] = [];
+  if (Array.isArray(d.times)) d.times = d.times.map(String);
+  if (Array.isArray(d.replies)) d.replies = d.replies.filter((r) => r && typeof r === 'object').map((r) => ({ ...r, text: r.text == null ? '' : String(r.text), by: r.by == null ? '' : String(r.by) }));
+  return d;
+}
+function applyRow(row) {
+  const key = `${row.store}:${row.id}`;
+  if (isTomb(row.data)) { storeOf(row.store).delete(row.id); trash.set(key, { store: row.store, id: row.id, data: row.data }); return; }
+  trash.delete(key);
+  const d = norm(row.data);
+  if (row.created_by) d._by = row.created_by;
+  storeOf(row.store).set(row.id, d);
 }
 
 async function loadCircle() {
-  mem.clear();
+  const rows = [];
   for (let from = 0; ; from += 1000) {
-    const { data, error } = await sb.from('items').select('store,id,data').eq('circle_id', circleId).range(from, from + 999);
+    const { data, error } = await sb.from('items').select('store,id,data,created_by').eq('circle_id', circleId).range(from, from + 999);
     if (error) throw new Error(error.message);
-    for (const row of data) if (!isTomb(row.data)) storeOf(row.store).set(row.id, row.data);
+    rows.push(...data);
     if (data.length < 1000) break;
   }
+  mem.clear(); trash.clear();
+  for (const row of rows) applyRow(row);
+  await loadMembers();
 }
+// Who is in the circle, so a message's sender can be checked against who really wrote it.
+const circleMembers = new Map(); // user_id -> { role, display_name }
+async function loadMembers() {
+  const { data } = await sb.from('members').select('user_id, role, display_name').eq('circle_id', circleId);
+  circleMembers.clear();
+  for (const m of data || []) circleMembers.set(m.user_id, m);
+}
+// The name to show for a message or photo: the member who actually created it. If the
+// "From" typed in differs (sending for someone else), show both.
+function sender(rec) {
+  const claimed = shortName(rec && rec.from);
+  const m = rec && rec._by && circleMembers.get(rec._by);
+  if (!m) return claimed;
+  const real = m.role === 'device' ? lovedOneName() : (shortName(m.display_name) || 'Family');
+  if (!claimed || claimed.toLowerCase() === real.toLowerCase()) return real;
+  if (/^(your )?family$/i.test(claimed)) return claimed; // the generic welcome note
+  return `${claimed} (sent by ${real})`;
+}
+
+// Reload everything after the phone slept or the live connection dropped, because missed
+// live updates are not replayed.
+let resyncTimer = null;
+function scheduleResync(delay = 4000) {
+  clearTimeout(resyncTimer);
+  resyncTimer = setTimeout(async () => {
+    if (!circleId) return;
+    try {
+      await loadCircle();
+      const s = storeOf('settings').get('main');
+      if (s) { settings = mergeSettings(s); applySettings(); }
+      listenLive();
+      softRender();
+    } catch (err) { console.warn('resync', err); scheduleResync(30000); }
+  }, delay);
+}
+let hiddenAt = 0;
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { hiddenAt = Date.now(); return; }
+  if (circleId && hiddenAt && Date.now() - hiddenAt > 30000) scheduleResync(0);
+});
 
 // Live updates: a message sent from a family phone appears on the loved one's screen right away.
 let liveChannel = null;
@@ -71,15 +152,17 @@ function listenLive() {
   const apply = (p) => {
     const n = p.new;
     if (!n || n.circle_id !== circleId) return;
-    if (isTomb(n.data)) storeOf(n.store).delete(n.id);
-    else storeOf(n.store).set(n.id, n.data);
+    applyRow(n);
     if (n.store === 'settings' && n.id === 'main' && !isTomb(n.data)) { settings = mergeSettings(n.data); applySettings(); }
     softRender();
   };
   liveChannel = sb.channel('circle-' + circleId)
     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'items', filter: `circle_id=eq.${circleId}` }, apply)
     .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'items', filter: `circle_id=eq.${circleId}` }, apply)
-    .subscribe();
+    .subscribe((status) => {
+      // If the live connection drops (phones do this when asleep), reload everything.
+      if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') scheduleResync();
+    });
 }
 
 // Re-render for live changes, but never while someone is typing in a form.
@@ -122,6 +205,9 @@ function safeUrl(u, hosts = null) {
 }
 const EMBED_HOSTS = ['www.youtube-nocookie.com', 'open.spotify.com', 'embed.music.apple.com'];
 const OPEN_HOSTS = ['youtube.com', 'youtu.be', 'open.spotify.com', 'music.apple.com'];
+const THUMB_HOSTS = ['i.ytimg.com', 'spotifycdn.com', 'i.scdn.co', 'mzstatic.com'];
+const PREVIEW_HOSTS = ['storage.googleapis.com', 'elevenlabs.io'];
+const svcName = (p) => (Object.hasOwn(SERVICE, String(p)) ? SERVICE[p] : '');
 const safeColor = (c, fallback = '#e48aa0') => (/^#[0-9a-f]{3,8}$/i.test(String(c || '')) ? c : fallback);
 const pad = (n) => String(n).padStart(2, '0');
 const dayKey = (d = new Date()) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -324,6 +410,7 @@ function stopSpeaking() {
 
 function speak(text, opts = {}) {
   if (!settings.voice || !text) return;
+  text = String(text).slice(0, 2500);
   if (!opts.device && (opts.elevenVoiceId || useEleven())) return speakEleven(text, opts);
   speakDevice(text, opts);
 }
@@ -436,8 +523,9 @@ async function mediaUrl(id) {
   // Signed links can't be revoked, so keep them short: 1 hour, reused for 50 minutes.
   const { data, error } = await sb.storage.from('media').createSignedUrl(m.path, 3600);
   if (error) { console.warn(error); return ''; }
-  urlCache.set(id, { url: data.signedUrl, until: Date.now() + 50 * 60 * 1000 });
-  return data.signedUrl;
+  const url = safeUrl(data.signedUrl, [new URL(SUPABASE_URL).hostname]);
+  urlCache.set(id, { url, until: Date.now() + 50 * 60 * 1000 });
+  return url;
 }
 function forgetUrl(id) { urlCache.delete(id); }
 async function saveMedia(file, caption = '', hidden = false, from = shortName(myName), extra = {}) {
@@ -518,10 +606,30 @@ async function seedExamples(includeBasics) {
   });
 }
 
+// Settings come from a row any member can write, so every field is coerced to a sane value.
 function mergeSettings(s) {
-  return { ...structuredClone(DEFAULTS), ...(s || {}), about: { ...DEFAULTS.about, ...((s && s.about) || {}) },
-    frame: { ...DEFAULTS.frame, ...((s && s.frame) || {}) },
-    evening: { ...DEFAULTS.evening, ...((s && s.evening) || {}) } };
+  const src = s && typeof s === 'object' ? s : {};
+  const obj = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
+  const m = { ...structuredClone(DEFAULTS), ...src, about: { ...DEFAULTS.about, ...obj(src.about) },
+    frame: { ...DEFAULTS.frame, ...obj(src.frame) }, evening: { ...DEFAULTS.evening, ...obj(src.evening) },
+    narration: obj(src.narration) };
+  const str = (v, n = 200) => String(v ?? '').slice(0, n);
+  const num = (v, lo, hi, d) => { const x = Number(v); return Number.isFinite(x) ? Math.min(hi, Math.max(lo, x)) : d; };
+  m.id = 'main';
+  m.name = str(m.name, 40); m.pin = str(m.pin || '1234', 8); m.voiceName = str(m.voiceName, 200);
+  m.scale = [1, 1.15, 1.3].includes(Number(m.scale)) ? Number(m.scale) : 1;
+  m.rate = num(m.rate, 0.6, 1.2, 0.85); m.voice = m.voice !== false;
+  m.voiceEngine = m.voiceEngine === 'device' ? 'device' : 'eleven';
+  m.elevenVoiceId = str(m.elevenVoiceId, 40).replace(/[^A-Za-z0-9]/g, '');
+  m.city = str(m.city, 80); m.place = str(m.place, 120); m.units = m.units === 'celsius' ? 'celsius' : 'fahrenheit';
+  m.lat = m.lat == null || m.lat === '' ? null : num(m.lat, -90, 90, null);
+  m.lon = m.lon == null || m.lon === '' ? null : num(m.lon, -180, 180, null);
+  m.helpPersonId = str(m.helpPersonId, 60);
+  for (const k of Object.keys(DEFAULTS.about)) m.about[k] = str(m.about[k], 1000);
+  for (const k of Object.keys(m.narration)) m.narration[k] = str(m.narration[k], 40).replace(/[^A-Za-z0-9]/g, '');
+  m.frame = { on: m.frame.on !== false, idleMin: num(m.frame.idleMin, 1, 60, 3) };
+  m.evening = { on: m.evening.on !== false, start: num(m.evening.start, 12, 20, 16), message: str(m.evening.message, 300), song: str(m.evening.song, 80) };
+  return m;
 }
 async function loadSettings() {
   const s = storeOf('settings').get('main');
@@ -697,7 +805,7 @@ async function viewHome() {
   const photos = gallery.filter((m) => !isVideo(m));
   const seen = photosSeen();
   const fresh = gallery.filter((m) => m.at > seen);
-  const freshFrom = [...new Set(fresh.map((m) => shortName(m.from)).filter(Boolean))];
+  const freshFrom = [...new Set(fresh.map((m) => sender(m)).filter(Boolean))];
   const freshWho = freshFrom.length ? joinNames(freshFrom) : 'your family';
   const memory = photos.length ? photos[Math.floor(now.getTime() / 86400000) % photos.length] : null;
   const w = weather && weather.lat === settings.lat && settings.lat != null ? weather : null;
@@ -739,7 +847,7 @@ async function viewHome() {
   let heroHtml = '';
   if (heroPic) {
     const url = await mediaUrl(heroPic.id);
-    const from = shortName(heroPic.from);
+    const from = sender(heroPic);
     const who = fresh.length ? freshFrom : (from ? [from] : []);
     const face = who.length === 1 ? avatar(await faceFor(who[0]), who[0]).replace('class="avatar"', 'class="avatar sm"') : '';
     const title = fresh.length ? `From ${freshWho}` : (heroPic.caption || (from ? `From ${from}` : 'A memory for today'));
@@ -764,7 +872,7 @@ async function viewHome() {
       <div class="section-label">${latest.read ? 'Latest message' : 'New message'}</div>
       <div class="latest-row">
         ${latest.mediaId ? `<img class="latest-thumb" src="${await mediaUrl(latest.mediaId)}" alt="">` : `<span class="latest-ic">${icon('msg')}</span>`}
-        <div><div class="latest-from">${esc(latest.from)}</div><div class="latest-text">${esc(latest.text)}</div></div>
+        <div><div class="latest-from">${esc(sender(latest))}</div><div class="latest-text">${esc(latest.text)}</div></div>
       </div>
     </a>` : '';
 
@@ -778,7 +886,7 @@ async function viewHome() {
 
   const tile = (href, ic, name, sub, cls, badge = 0) => `
     <a class="tile ${cls}" href="${href}">${badge ? `<span class="badge">${badge}</span>` : ''}
-      <span class="tile-ic">${icon(ic)}</span><span class="tile-name">${name}</span><span class="tile-sub">${sub}</span></a>`;
+      <span class="tile-ic">${icon(ic)}</span><span class="tile-name">${esc(name)}</span><span class="tile-sub">${esc(sub)}</span></a>`;
 
   const familyStrip = myRole === 'family'
     ? `<a class="family-strip" href="#care">${icon('gear')} You're seeing ${esc(settings.name || 'their')}${settings.name ? "'s" : ''} screen · <b>Family tools</b></a>` : '';
@@ -812,11 +920,11 @@ async function viewHome() {
     <nav class="tiles" aria-label="Main menu">
       ${tile('#day', 'day', 'My Day', `${items.length - open.length} of ${items.length} done`, 't-ai')}
       ${tile('#messages', 'msg', 'Messages', unread ? `${unread} new` : 'From family', 't-shu', unread)}
-      ${tile('#photos', 'photo', 'Photos', fresh.length ? `${fresh.length} new` : '&amp; videos', 't-kin', fresh.length)}
+      ${tile('#photos', 'photo', 'Photos', fresh.length ? `${fresh.length} new` : '& videos', 't-kin', fresh.length)}
       ${tile('#people', 'family', 'Family', 'Call or see', 't-fuji')}
       ${tile('#story', 'book', 'My Life', storyCount ? `${storyCount} ${storyCount === 1 ? 'story' : 'stories'} from your life` : 'Stories and old photos', 't-story wide')}
       ${tile('#meds', 'med', 'Medicines', 'What to take', 't-matcha')}
-      ${tile('#calendar', 'cal', 'Calendar', upcoming[0] ? esc(fmtDay(upcoming[0].date).split(' · ')[0]) : 'Appointments', 't-sora')}
+      ${tile('#calendar', 'cal', 'Calendar', upcoming[0] ? fmtDay(upcoming[0].date).split(' · ')[0] : 'Appointments', 't-sora')}
       ${tile('#music', 'music', 'Music', 'Favorite songs', 't-sakura')}
       ${tile('#about', 'about', 'About Me', 'My details', 't-cha')}
     </nav>
@@ -881,7 +989,7 @@ async function viewMessages() {
     <a class="paper msg ${m.read ? '' : 'unread'}" href="#message/${esc(m.id)}">
       ${m.mediaId ? `<img class="latest-thumb" src="${await mediaUrl(m.mediaId)}" alt="">` : `<span class="latest-ic">${icon('msg')}</span>`}
       <span class="msg-body">
-        <span class="msg-from">${esc(m.from)}${m.read ? '' : '<span class="new-pill">New</span>'}</span>
+        <span class="msg-from">${esc(sender(m))}${m.read ? '' : '<span class="new-pill">New</span>'}</span>
         <span class="msg-when">${fmtWhen(m.at)}</span>
         <span class="msg-preview">${esc(m.text)}</span>
       </span>
@@ -902,17 +1010,17 @@ async function viewMessage(id) {
     if (media && url) {
       mediaHtml = `<div class="media">${isVideo(media)
         ? `<video src="${url}" controls playsinline></video>`
-        : `<img src="${url}" alt="${esc(media.caption || 'Photo from ' + m.from)}">`}</div>`;
+        : `<img src="${url}" alt="${esc(media.caption || 'Photo from ' + sender(m))}">`}</div>`;
     }
   }
   return topbar('', '#messages', 'Messages') + `
     <article class="paper letter">
       <div class="kicker">From</div>
-      <h2>${esc(m.from)}</h2>
+      <h2>${esc(sender(m))}</h2>
       <div class="msg-when">${fmtWhen(m.at)}</div>
       <div class="letter-text">${esc(m.text)}</div>
       ${mediaHtml}
-      <div class="btn-row">${speakBtn(m.voiceId && storeOf('voices').has(m.voiceId) ? m.text : `Message from ${m.from}. ${m.text}`, 'Read to me', { purpose: 'message', voice: m.voiceId })}</div>
+      <div class="btn-row">${speakBtn(m.voiceId && storeOf('voices').has(m.voiceId) ? m.text : `Message from ${sender(m)}. ${m.text}`, 'Read to me', { purpose: 'message', voice: m.voiceId })}</div>
     </article>
     <div class="paper">
       <div class="section-label">Send a reply</div>
@@ -934,7 +1042,7 @@ async function viewPhotos() {
       ? `<video src="${url}#t=0.5" muted playsinline preload="metadata"></video><span class="play">${icon('play')}</span>`
       : `<img src="${url}" alt="${esc(m.caption)}" loading="lazy">`}</div>
       ${m.at > seen ? '<span class="new-pill on-photo">New</span>' : ''}
-      <div class="cap">${esc(m.caption || ' ')}${m.from ? `<span class="cap-from">From ${esc(shortName(m.from))}</span>` : ''}</div></a>`;
+      <div class="cap">${esc(m.caption || ' ')}${m.from ? `<span class="cap-from">From ${esc(sender(m))}</span>` : ''}</div></a>`;
   }));
   return topbar('Photos') + `<button class="btn big wide slideshow-btn" data-action="frame-open">▶ Show as a slideshow</button>
     <div class="gallery">${cards.join('')}</div>`;
@@ -953,11 +1061,11 @@ async function viewPhoto(id) {
       <div class="frame">${isVideo(m)
         ? `<video src="${url}" controls playsinline autoplay></video>`
         : `<img src="${url}" alt="${esc(m.caption)}">`}</div>
-      ${m.from ? `<div class="from-row">${avatar(await faceFor(m.from), m.from).replace('class="avatar"', 'class="avatar sm"')}
-        <div><div class="from-name">From ${esc(shortName(m.from))}</div><div class="msg-when">${fmtWhen(m.at)}</div></div></div>` : ''}
+      ${m.from ? `<div class="from-row">${avatar(await faceFor(sender(m)), sender(m)).replace('class="avatar"', 'class="avatar sm"')}
+        <div><div class="from-name">From ${esc(sender(m))}</div><div class="msg-when">${fmtWhen(m.at)}</div></div></div>` : ''}
       ${m.caption ? `<div class="caption">${esc(m.caption)}</div>` : ''}
       ${m.from ? '' : `<div class="msg-when">Added ${fmtWhen(m.at)}</div>`}
-      ${m.caption || m.from ? `<div class="btn-row">${speakBtn([m.from ? `${shortName(m.from)} sent you this.` : '', m.caption].filter(Boolean).join(' '))}</div>` : ''}
+      ${m.caption || m.from ? `<div class="btn-row">${speakBtn([m.from ? `${sender(m)} sent you this.` : '', m.caption].filter(Boolean).join(' '))}</div>` : ''}
       ${m.from ? replyBar('media', m) : ''}
       <div class="nav">
         ${prev ? `<a class="btn big" href="#photo/${esc(prev.id)}">‹ Newer</a>` : '<span></span>'}
@@ -985,7 +1093,7 @@ async function markSeen(store, item) {
 function replyBar(store, item) {
   const reps = item.replies || [];
   const loved = reps.some((r) => r.kind === 'heart');
-  const to = shortName(item.from) || 'your family';
+  const to = (store === 'story' ? shortName(item.from) : sender(item)) || 'your family';
   const sent = reps.slice(-3).map((r) => `<div class="reply">${r.kind === 'heart' ? 'You sent a ❤️'
     : r.kind === 'voice' ? '🎤 You sent a voice message' : `You replied: <strong>${esc(r.text)}</strong>`} · ${fmtWhen(r.at)}</div>`).join('');
   return `<div class="reply-box">
@@ -1016,7 +1124,7 @@ function voiceOverlay(state, to) {
 async function startVoiceNote(store, id) {
   const item = await get(store, id);
   if (!item || vn.recorder) return;
-  const to = shortName(item.from) || 'your family';
+  const to = (store === 'story' ? shortName(item.from) : sender(item)) || 'your family';
   try {
     vn.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
   } catch {
@@ -1090,7 +1198,7 @@ async function onThisDay(now = new Date()) {
 }
 function otdSentence(otd) {
   const it = otd.items[0];
-  if (otd.kind === 'photo') return `${it.from ? shortName(it.from) + ' sent you a photo' : 'A photo arrived'} on this day ${yearsAgo(new Date(it.at).getFullYear())}.`;
+  if (otd.kind === 'photo') return `${it.from ? sender(it) + ' sent you a photo' : 'A photo arrived'} on this day ${yearsAgo(new Date(it.at).getFullYear())}.`;
   return `${otd.kind === 'day' ? 'On this day' : 'This month'}, back in ${it.year}: ${it.title}.`;
 }
 const yearsAgo = (year) => { const n = new Date().getFullYear() - Number(year); return n === 1 ? 'a year ago' : `${n} years ago`; };
@@ -1101,7 +1209,7 @@ async function onThisDayCard(otd) {
       <div class="section-label">On this day</div>
       <div class="otd-row"><img class="otd-pic" src="${await mediaUrl(it.id)}" alt="">
         <div><div class="otd-title">${esc(yearsAgo(new Date(it.at).getFullYear()))} today</div>
-        <div class="otd-sub">${it.from ? `From ${esc(shortName(it.from))}` : ''}${it.caption ? ` · ${esc(it.caption)}` : ''}</div></div></div></a>`;
+        <div class="otd-sub">${it.from ? `From ${esc(sender(it))}` : ''}${it.caption ? ` · ${esc(it.caption)}` : ''}</div></div></div></a>`;
   }
   const pic = it.photoId ? `<img class="otd-pic" src="${await mediaUrl(it.photoId)}" alt="">` : `<span class="otd-ic">${icon('book')}</span>`;
   return `<a class="paper otd" href="#story/${esc(it.id)}">
@@ -1164,7 +1272,7 @@ async function careStory() {
   const rows = await Promise.all(list.map(async (x) => `
     <div class="list-item">
       ${x.photoId ? `<img class="mini-thumb" src="${await mediaUrl(x.photoId)}" alt="">` : ''}
-      <span style="flex:1"><strong>${esc(x.title)}</strong><br><span class="meta">${esc(storyWhen(x))}${x.place ? ` · ${esc(x.place)}` : ''}${x.from ? ` · told by ${esc(shortName(x.from))}` : ''}</span></span>
+      <span class="grow"><strong>${esc(x.title)}</strong><br><span class="meta">${esc(storyWhen(x))}${x.place ? ` · ${esc(x.place)}` : ''}${x.from ? ` · told by ${esc(shortName(x.from))}` : ''}</span></span>
       <button class="btn small danger" data-action="story-del" data-id="${esc(x.id)}">Delete</button>
     </div>`));
   return `
@@ -1310,10 +1418,10 @@ async function viewMusic(id) {
   if (!list.length && !links.length) return topbar('Music') + empty('music', 'No songs yet.', 'Your family can add favorite songs in Family settings.');
   const linkCards = links.map((m) => `
     <a class="paper song-link" href="#music/${esc(m.id)}">
-      <span class="cover">${safeUrl(m.thumb) ? `<img src="${esc(safeUrl(m.thumb))}" alt="" loading="lazy">` : icon('music')}</span>
+      <span class="cover">${safeUrl(m.thumb, THUMB_HOSTS) ? `<img src="${esc(safeUrl(m.thumb, THUMB_HOSTS))}" alt="" loading="lazy">` : icon('music')}</span>
       <span class="song-body"><span class="song-title">${esc(m.title || 'Song')}</span>
         ${m.artist ? `<span class="song-artist">${esc(m.artist)}</span>` : ''}
-        ${SERVICE[m.provider] ? `<span class="svc svc-${esc(m.provider)}">${SERVICE[m.provider]}</span>` : ''}</span>
+        ${svcName(m.provider) ? `<span class="svc svc-${esc(m.provider)}">${svcName(m.provider)}</span>` : ''}</span>
       <span class="play-pill">${icon('play')} Play</span>
     </a>`).join('');
   return topbar('Music') + linkCards + list.map((s) => {
@@ -1332,13 +1440,12 @@ function viewMusicPlayer(m) {
   const embed = p && safeUrl(p.embed, EMBED_HOSTS);
   if (!p || !embed) return topbar('', '#music', 'All music') + empty('music', "This song's link can't be played.", 'A family member can remove it and add it again.');
   const open = safeUrl(p.open, OPEN_HOSTS);
-  const height = p.provider === 'youtube' ? null : p.provider === 'spotify' ? (p.tall ? 452 : 352) : (p.tall ? 450 : 175);
-  const appName = SERVICE[p.provider];
+  const appName = svcName(p.provider);
   return topbar('', '#music', 'All music') + `
     <div class="player">
       <h1 class="player-title">${esc(m.title || 'Song')}</h1>
       ${m.artist ? `<div class="song-artist big">${esc(m.artist)}</div>` : ''}
-      <div class="embed ${p.provider === 'youtube' ? 'embed-video' : ''}" ${height ? `style="height:${height}px"` : ''}>
+      <div class="embed ${p.provider === 'youtube' ? 'embed-video' : `embed-${p.provider}${p.tall ? '-tall' : ''}`}">
         <iframe src="${esc(embed)}" title="${esc(m.title || 'Music player')}" loading="eager"
           allow="autoplay; encrypted-media; clipboard-write; fullscreen; picture-in-picture" allowfullscreen></iframe>
       </div>
@@ -1433,6 +1540,7 @@ async function careCircle() {
   const who = settings.name || 'your loved one';
   const whose = settings.name ? `${esc(settings.name)}'s` : 'their';
   const live = (role) => lastCode && lastCode.role === role && lastCode.until > Date.now() ? lastCode.code : null;
+  const liveToken = () => lastCode && lastCode.token;
   const pretty = (k) => esc(String(k).replace(/^(\d{4})(\d{4})$/, '$1 $2'));
   const typedUntil = lastCode ? new Date(lastCode.made + 30 * 60 * 1000) : null;
   const typedLive = typedUntil && typedUntil > Date.now();
@@ -1453,7 +1561,7 @@ async function careCircle() {
       <p>Takes about a minute. Nobody types passwords or web addresses.</p>
       <button class="btn primary big" data-action="make-code" data-id="device">Start</button>
     </div>` : (() => {
-      const url = `${appUrl}?pair=${deviceCode}&c=${circleId}`;
+      const url = `${appUrl}?pair=${liveToken()}`;
       return `
     <div class="paper">
       <h2>Set up ${whose} phone or tablet</h2>
@@ -1485,7 +1593,7 @@ async function careCircle() {
       <p class="hint">They'll be able to send messages and photos, and see what's done each day. Everyone signs in with their own email.</p>
       <button class="btn" data-action="make-code" data-id="family">Invite someone</button>
     </div>` : (() => {
-      const url = `${appUrl}?invite=${famCode}&c=${circleId}`;
+      const url = `${appUrl}?invite=${liveToken()}`;
       return `
     <div class="paper">
       <h2>Invite a relative</h2>
@@ -1553,7 +1661,7 @@ async function careVoices() {
       <p>${esc(loved)} can hear <b>your</b> voice, and your sister's, and anyone else's who records, instead of a stranger's.</p>
       ${voices.length ? voices.map((v) => `
         <div class="list-item"><span>🎙️ <strong>${esc(v.name)}</strong><br><span class="meta">Added ${new Date(v.at).toLocaleDateString()}</span></span>
-          <span class="row" style="flex:none;gap:.4rem">
+          <span class="row fixed tight">
             <button class="btn small" data-action="voice-try" data-id="${esc(v.id)}">${icon('speak')} Listen</button>
             ${myRole === 'family' ? `<button class="btn small danger" data-action="voice-del" data-id="${esc(v.id)}">Remove</button>` : ''}
           </span></div>`).join('') : '<p class="hint">No family voices yet. Add the first one below.</p>'}
@@ -1669,7 +1777,7 @@ async function careActivity() {
   return `${pairPrompt}
     <div class="stat-row">
       <div class="stat"><div class="n">${done.length}/${items.length}</div><div class="l">done today</div></div>
-      <div class="stat"><div class="n" style="color:${missed.length ? 'var(--shu)' : 'inherit'}">${missed.length}</div><div class="l">overdue</div></div>
+      <div class="stat"><div class="n${missed.length ? ' bad' : ''}">${missed.length}</div><div class="l">overdue</div></div>
       <div class="stat"><div class="n">${unread}</div><div class="l">unread messages</div></div>
     </div>
     <div class="paper"><h2>Overdue today</h2>
@@ -1690,8 +1798,8 @@ async function lovedOneFeed(msgs) {
   const who = lovedOneName();
   const events = [];
   for (const m of msgs) {
-    for (const r of m.replies || []) events.push({ ...r, to: shortName(m.from), what: 'message', about: m.text, link: null });
-    if (m.readAt) events.push({ kind: 'seen', at: m.readAt, to: shortName(m.from), what: 'message', about: m.text, n: 1 });
+    for (const r of m.replies || []) events.push({ ...r, to: sender(m), what: 'message', about: m.text, link: null });
+    if (m.readAt) events.push({ kind: 'seen', at: m.readAt, to: sender(m), what: 'message', about: m.text, n: 1 });
   }
   for (const x of await all('story')) {
     for (const r of x.replies || []) events.push({ ...r, to: shortName(x.from), what: 'story', about: x.title, thumb: x.photoId });
@@ -1699,10 +1807,10 @@ async function lovedOneFeed(msgs) {
   const seenGroups = new Map();
   for (const m of media.filter((x) => x.kind !== 'voice-note')) {
     const what = isVideo(m) ? 'video' : 'photo';
-    for (const r of m.replies || []) events.push({ ...r, to: shortName(m.from), what, about: m.caption, thumb: m.id });
+    for (const r of m.replies || []) events.push({ ...r, to: sender(m), what, about: m.caption, thumb: m.id });
     if (m.seenAt && m.from) {
-      const k = `${shortName(m.from)}|${Math.floor(m.seenAt / 600000)}`; // photos seen in the same few minutes count as one
-      const g = seenGroups.get(k) || { kind: 'seen', at: m.seenAt, to: shortName(m.from), what: 'photo', n: 0, thumb: m.id };
+      const k = `${sender(m)}|${Math.floor(m.seenAt / 600000)}`; // photos seen in the same few minutes count as one
+      const g = seenGroups.get(k) || { kind: 'seen', at: m.seenAt, to: sender(m), what: 'photo', n: 0, thumb: m.id };
       g.n += 1; g.at = Math.max(g.at, m.seenAt); seenGroups.set(k, g);
     }
   }
@@ -1821,7 +1929,7 @@ async function careMessages() {
     </form>
     <div class="paper"><h2>Sent messages</h2>
       ${msgs.length ? msgs.map((m) => `
-        <div class="list-item"><span><strong>${esc(m.from)}</strong>: ${esc(m.text.slice(0, 60))}${m.text.length > 60 ? '…' : ''}
+        <div class="list-item"><span><strong>${esc(sender(m))}</strong>: ${esc(m.text.slice(0, 60))}${m.text.length > 60 ? '…' : ''}
           <br><span class="meta">${fmtWhen(m.at)} · ${m.read ? `Read ✓${m.readAt ? ' ' + fmtWhen(m.readAt) : ''}` : 'Not read yet'}${(m.replies || []).some((r) => r.kind === 'heart') ? ' · ❤️' : ''}${(m.replies || []).length ? ` · ${m.replies.length} repl${m.replies.length > 1 ? 'ies' : 'y'}` : ''}</span></span>
         <button class="btn small danger" data-action="msg-del" data-id="${esc(m.id)}">Delete</button></div>`).join('')
         : '<p class="hint">No messages yet.</p>'}
@@ -1834,10 +1942,10 @@ async function carePhotos() {
     const url = await mediaUrl(m.id);
     return `<div class="list-item">
       ${isVideo(m) ? `<video class="mini-thumb" src="${url}#t=0.5" muted preload="metadata"></video>` : `<img class="mini-thumb" src="${url}" alt="">`}
-      <span class="hint" style="flex:none">${m.from ? `from ${esc(shortName(m.from))}<br>` : ''}${m.seenAt ? 'Seen ✓' : 'Not seen yet'}${(m.replies || []).some((r) => r.kind === 'heart') ? ' · ❤️' : ''}</span>
-      <form class="row" data-form="caption-save" data-id="${esc(m.id)}" style="flex:1">
+      <span class="hint fixed">${m.from ? `from ${esc(sender(m))}<br>` : ''}${m.seenAt ? 'Seen ✓' : 'Not seen yet'}${(m.replies || []).some((r) => r.kind === 'heart') ? ' · ❤️' : ''}</span>
+      <form class="row grow" data-form="caption-save" data-id="${esc(m.id)}">
         <input type="text" name="caption" value="${esc(m.caption)}" placeholder="Add a caption" maxlength="120">
-        <button class="btn small" type="submit" style="flex:none">Save</button>
+        <button class="btn small fixed" type="submit">Save</button>
       </form>
       <button class="btn small danger" data-action="media-del" data-id="${esc(m.id)}">Delete</button></div>`;
   }));
@@ -1874,8 +1982,8 @@ async function careMusic() {
     </form>
     ${links.length ? `<div class="paper"><h2>Music links (${links.length})</h2>
       ${links.map((m) => `<div class="list-item">
-        ${safeUrl(m.thumb) ? `<img class="mini-thumb" src="${esc(safeUrl(m.thumb))}" alt="">` : ''}
-        <span style="flex:1;min-width:0"><strong>${esc(m.title || 'Song')}</strong><br><span class="meta">${SERVICE[m.provider] || ''}${m.artist ? ' · ' + esc(m.artist) : ''}</span></span>
+        ${safeUrl(m.thumb, THUMB_HOSTS) ? `<img class="mini-thumb" src="${esc(safeUrl(m.thumb, THUMB_HOSTS))}" alt="">` : ''}
+        <span class="grow min0"><strong>${esc(m.title || 'Song')}</strong><br><span class="meta">${svcName(m.provider)}${m.artist ? ' · ' + esc(m.artist) : ''}</span></span>
         <button class="btn small danger" data-action="music-del" data-id="${esc(m.id)}">Remove</button></div>`).join('')}
     </div>` : ''}
     <form class="paper stack" data-form="song-add">
@@ -1886,9 +1994,9 @@ async function careMusic() {
     </form>
     <div class="paper"><h2>Songs (${list.length})</h2>
       ${list.map((s) => `<div class="list-item">
-        <form class="row" data-form="caption-save" data-id="${esc(s.id)}" style="flex:1">
+        <form class="row grow" data-form="caption-save" data-id="${esc(s.id)}">
           <input type="text" name="caption" value="${esc(s.caption)}" maxlength="120">
-          <button class="btn small" type="submit" style="flex:none">Save</button>
+          <button class="btn small fixed" type="submit">Save</button>
         </form>
         <button class="btn small danger" data-action="media-del" data-id="${esc(s.id)}">Delete</button></div>`).join('') || '<p class="hint">No songs yet.</p>'}
     </div>`;
@@ -1930,12 +2038,12 @@ async function careAbout() {
       </div>
       <label>Good to remember <span class="hint">(one per line)</span>
         <textarea name="facts" maxlength="1500" placeholder="You live with your husband, Tom.&#10;Your doctor is Dr. Lee.&#10;Your cat is called Miso.">${esc(a.facts)}</textarea></label>
-      <h2 style="margin-top:.6rem">Help button</h2>
+      <h2 class="h2-gap">Help button</h2>
       <label>Who to call first <select name="helpPersonId">
         <option value="">First person with a phone number</option>
         ${people.map((p) => `<option value="${esc(p.id)}" ${p.id === settings.helpPersonId ? 'selected' : ''}>${esc(p.name)}${telOf(p) ? '' : ' (no phone)'}</option>`).join('')}
       </select></label>
-      <h2 style="margin-top:.6rem">Weather</h2>
+      <h2 class="h2-gap">Weather</h2>
       <div class="row">
         <label>Town or city <input type="text" name="city" value="${esc(settings.city)}" maxlength="80" placeholder="e.g. Louisville, Kentucky">
           ${settings.place ? `<span class="hint">Found: ${esc(settings.place)}</span>` : ''}</label>
@@ -1996,9 +2104,9 @@ async function careEleven() {
       </select></label>
       ${voices.length ? `
       <label>Voice <select name="elevenVoiceId" id="eleven-pick">
-        ${voices.map((v) => `<option value="${esc(v.id)}" data-preview="${esc(v.preview)}" ${v.id === settings.elevenVoiceId ? 'selected' : ''}>${esc(v.name)}${describe(v) ? ' — ' + esc(describe(v)) : ''}</option>`).join('')}
+        ${voices.map((v) => `<option value="${esc(v.id)}" data-preview="${esc(safeUrl(v.preview, PREVIEW_HOSTS))}" ${v.id === settings.elevenVoiceId ? 'selected' : ''}>${esc(v.name)}${describe(v) ? ' — ' + esc(describe(v)) : ''}</option>`).join('')}
       </select></label>
-      <div class="btn-row" style="margin-top:0">
+      <div class="btn-row flush">
         <button class="btn small" type="button" data-action="eleven-sample">${icon('speak')} Quick sample</button>
         <button class="btn small" type="button" data-action="eleven-try">${icon('speak')} Hear it read the day</button>
         <button class="btn primary small" type="submit">Use this voice</button>
@@ -2024,7 +2132,7 @@ function careVoice() {
       </select></label>
       <label>Speed <select name="rate" id="voice-rate">${rates.map(([r, l]) =>
         `<option value="${r}" ${Number(settings.rate) === r ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
-      <div class="btn-row" style="margin-top:0">
+      <div class="btn-row flush">
         <button class="btn small" type="button" data-action="voice-preview">${icon('speak')} Listen</button>
         <button class="btn primary small" type="submit">Use this voice</button>
       </div>
@@ -2046,6 +2154,23 @@ async function eveningSongOptions() {
   return `<option value="" ${!sel ? 'selected' : ''}>The first song in Music</option>
     ${links.map((m) => `<option value="link:${esc(m.id)}" ${sel === 'link:' + m.id ? 'selected' : ''}>${esc(m.title || 'Song')}</option>`).join('')}
     ${files.map((m) => `<option value="song:${esc(m.id)}" ${sel === 'song:' + m.id ? 'selected' : ''}>${esc(m.caption || 'Song')}</option>`).join('')}`;
+}
+const TRASH_KINDS = {
+  messages: ['Message', (d) => d.text], media: ['Photo', (d) => d.caption || (isVideo(d) ? 'A video' : 'A photo')],
+  story: ['Life story', (d) => d.title], tasks: ['Daily task', (d) => d.title], meds: ['Medicine', (d) => d.name],
+  events: ['Calendar', (d) => d.title], music: ['Song', (d) => d.title], people: ['Person', (d) => d.name],
+};
+async function recentlyDeleted() {
+  const month = Date.now() - 30 * 86400000;
+  const rows = [...trash.values()]
+    .filter((t) => TRASH_KINDS[t.store] && !(t.store === 'media' && t.data.hidden) && (Number(t.data.deletedAt) || 0) > month)
+    .sort((a, b) => (Number(b.data.deletedAt) || 0) - (Number(a.data.deletedAt) || 0)).slice(0, 40);
+  return `<div class="paper"><h2>Recently deleted</h2>
+    <p class="hint">Deleted things stay here for 30 days, then they're removed for good.</p>
+    ${rows.length ? rows.map((t) => `<div class="list-item"><span class="grow min0"><strong>${esc(TRASH_KINDS[t.store][0])}</strong>: ${esc(String(TRASH_KINDS[t.store][1](t.data) || '').slice(0, 60))}
+      <br><span class="meta">Deleted ${esc(fmtWhen(Number(t.data.deletedAt) || 0))}</span></span>
+      <button class="btn small" data-action="restore" data-store="${esc(t.store)}" data-id="${esc(t.id)}">Restore</button></div>`).join('')
+      : '<p class="hint">Nothing deleted recently.</p>'}</div>`;
 }
 async function careSettings() {
   const scales = [[1, 'Large'], [1.15, 'Larger'], [1.3, 'Largest']];
@@ -2088,7 +2213,8 @@ async function careSettings() {
       <h2>Your data</h2>
       <p class="hint">Everything is saved securely online and shared only with the people in this care circle (see Family &amp; devices).</p>
       ${myRole === 'family' ? '<button class="btn small danger" data-action="reset">Delete this care circle…</button>' : ''}
-    </div>`;
+    </div>
+    ${myRole === 'family' ? await recentlyDeleted() : ''}`;
 }
 
 // ================================================================ router
@@ -2145,7 +2271,7 @@ document.addEventListener('click', async (e) => {
       const opt = document.getElementById('eleven-pick')?.selectedOptions[0];
       if (opt && opt.dataset.preview) {
         stopSpeaking();
-        voicePlayer.src = opt.dataset.preview;
+        voicePlayer.src = safeUrl(opt.dataset.preview, PREVIEW_HOSTS);
         voicePlayer.play().catch(() => toast('Tap again to play'));
       } else toast('No sample for this voice — try "Hear it read the day"');
       break;
@@ -2175,13 +2301,25 @@ document.addEventListener('click', async (e) => {
       const item = await get(store, id);
       if (!item || (item.replies || []).some((r) => r.kind === 'heart')) break;
       await addReply(store, id, { kind: 'heart' });
-      toast(`❤️ Sent to ${shortName(item.from) || 'your family'}`);
-      speak(`${shortName(item.from) || 'Your family'} will know you loved it.`);
+      toast(`❤️ Sent to ${sender(item) || 'your family'}`);
+      speak(`${sender(item) || 'Your family'} will know you loved it.`);
       render();
       break;
     }
     case 'vnote': await startVoiceNote(el.dataset.store, id); break;
     case 'frame-open': await openFrame(); break;
+    case 'reload': location.reload(); break;
+    case 'invite-back': local('invite', null); location.reload(); break;
+    case 'restore': {
+      try {
+        const st = el.dataset.store;
+        const t = trash.get(`${st}:${id}`);
+        await restore(st, id);
+        if (st === 'story' && t && t.data.photoId && trash.has(`media:${t.data.photoId}`)) await restore('media', t.data.photoId);
+        toast('Restored ✓'); render();
+      } catch (err) { toast(err.message); }
+      break;
+    }
     case 'story-idea': {
       const f = el.closest('form');
       if (f) { f.querySelector('[name=title]').value = text; f.querySelector('[name=year]').focus(); }
@@ -2254,7 +2392,7 @@ document.addEventListener('click', async (e) => {
     case 'make-code': {
       const { data, error } = await sb.rpc('make_code', { p_circle: circleId, p_role: id });
       if (error) { toast(error.message); break; }
-      lastCode = { code: data, role: id, made: Date.now(), until: Date.now() + 24 * 3600 * 1000 };
+      lastCode = { code: data.code, token: data.token, role: id, made: Date.now(), until: Date.now() + 24 * 3600 * 1000 };
       render();
       break;
     }
@@ -2344,9 +2482,10 @@ document.addEventListener('submit', async (e) => {
           if (error) { toast(error.message); break; }
           me = data.user;
         }
-        const { data: joined, error } = await sb.rpc('redeem_code', { p_code: val(fd, 'code'), p_display: val(fd, 'device') || 'Companion device', p_circle: linkCircle(fd.get('circle')) });
+        const token = linkToken(fd.get('token'));
+        const { data: joined, error } = await sb.rpc('redeem_code', { p_code: val(fd, 'code'), p_display: val(fd, 'device') || 'Companion device', p_token: token });
         if (error) { toast(error.message); break; }
-        if (!joined) { toast(fd.get('circle') ? 'That link has expired or was already used. Ask for a new one.' : 'That code is not right or has expired. Typed codes work for 30 minutes.'); break; }
+        if (!joined) { toast(token ? 'That link has expired or was already used. Ask for a new one.' : 'That code is not right or has expired. Typed codes work for 30 minutes.'); break; }
         await enterCircle();
         break;
       }
@@ -2362,11 +2501,11 @@ document.addEventListener('submit', async (e) => {
         break;
       }
       case 'join-family': {
-        const viaLink = fd.get('code') === local('invite') ? local('inviteCircle') : null;
-        const { data: joined, error } = await sb.rpc('redeem_code', { p_code: val(fd, 'code'), p_display: val(fd, 'me'), p_circle: linkCircle(viaLink) });
+        const token = linkToken(fd.get('token'));
+        const { data: joined, error } = await sb.rpc('redeem_code', { p_code: val(fd, 'code'), p_display: val(fd, 'me'), p_token: token });
         if (error) { toast(error.message); break; }
-        if (!joined) { toast(viaLink ? 'That invite has expired or was already used. Ask for a new one.' : 'That code is not right or has expired. Typed codes work for 30 minutes.'); break; }
-        local('invite', null); local('inviteCircle', null);
+        if (!joined) { toast(token ? 'That invite has expired or was already used. Ask for a new one.' : 'That code is not right or has expired. Typed codes work for 30 minutes.'); break; }
+        local('invite', null);
         await enterCircle();
         break;
       }
@@ -2669,14 +2808,14 @@ function showCheckEmail(email) {
       <button class="btn ghost" data-action="welcome-family">‹ Use a different email</button>
     </div>`;
 }
-// The circle id that pairing/invite links carry (a UUID), or null.
-const linkCircle = (v) => (/^[0-9a-f-]{36}$/i.test(String(v || '')) ? String(v) : null);
-function showPair(code = '', circle = null) {
-  const ready = /^\d{8}$/.test(code);
+// Links and QR codes carry a 32-character random token; typed codes are 8 digits.
+const linkToken = (v) => (/^[0-9a-f]{32}$/.test(String(v || '').toLowerCase()) ? String(v).toLowerCase() : null);
+function showPair(code = '', token = null) {
+  const ready = !!token || /^\d{8}$/.test(code);
   $app.innerHTML = welcomeHero(ready ? 'Almost done' : 'Pair this phone', ready ? 'One tap and this phone is ready.' : 'Ask a family member for the QR code or link, or an 8-digit code.') + `
     <form class="paper stack" data-form="pair-code">
       ${ready ? `<p class="ready-text">Your family has set up a companion for you. Tap the button below.</p>
-        <input type="hidden" name="code" value="${esc(code)}">${circle ? `<input type="hidden" name="circle" value="${esc(circle)}">` : ''}`
+        <input type="hidden" name="code" value="${esc(code)}">${token ? `<input type="hidden" name="token" value="${esc(token)}">` : ''}`
       : `<p>A family member gets the code in <b>Family tools → Family &amp; devices</b>.</p>
         <label>Pairing code <input type="text" name="code" required inputmode="numeric" autocomplete="one-time-code" maxlength="9" class="code-input" placeholder="1234 5678" autofocus></label>
         <label>Name this device <span class="hint">(optional)</span><input type="text" name="device" maxlength="40" placeholder="e.g. Mom's iPad"></label>`}
@@ -2695,7 +2834,7 @@ function showFamilyHasLink() {
   $app.innerHTML = welcomeHero('This link is for their phone', `You're signed in as family here.`) + `
     <div class="paper">
       <p>That setup link should be opened on <b>your loved one's</b> phone, not this one. Scan the QR code with their phone's camera, or send the link to them.</p>
-      <button class="btn primary big wide" onclick="location.reload()">Go to Family tools</button>
+      <button class="btn primary big wide" data-action="reload">Go to Family tools</button>
     </div>`;
 }
 function showSetup() {
@@ -2712,12 +2851,14 @@ function showSetup() {
   $app.querySelector('[autofocus]')?.focus();
 }
 function showJoin() {
-  $app.innerHTML = welcomeHero('Join your family', `Signed in as ${me.email || ''}`) + `
+  const token = linkToken(local('invite'));
+  $app.innerHTML = welcomeHero('Join your family', `Signed in as ${esc(me.email || '')}`) + `
     <form class="paper stack" data-form="join-family">
-      <label>Invite code <input type="text" name="code" required inputmode="numeric" maxlength="9" class="code-input" placeholder="1234 5678" value="${esc(local('invite') || '')}" ${local('invite') ? '' : 'autofocus'}></label>
-      <label>Your name, as they know you <input type="text" name="me" required maxlength="40" placeholder="e.g. Tom (your son)" ${local('invite') ? 'autofocus' : ''}></label>
+      ${token ? `<p class="ready-text">You've been invited to help care for your loved one.</p><input type="hidden" name="token" value="${esc(token)}">`
+        : `<label>Invite code <input type="text" name="code" required inputmode="numeric" maxlength="9" class="code-input" placeholder="1234 5678" autofocus></label>`}
+      <label>Your name, as they know you <input type="text" name="me" required maxlength="40" placeholder="e.g. Tom (your son)" ${token ? 'autofocus' : ''}></label>
       <button class="btn primary big" type="submit">Join</button>
-      <button class="btn ghost" type="button" onclick="localStorage.removeItem('invite');location.reload()">‹ Back</button>
+      <button class="btn ghost" type="button" data-action="invite-back">‹ Back</button>
     </form>`;
   $app.querySelector('[autofocus]')?.focus();
 }
@@ -2814,7 +2955,11 @@ function frameShouldStart() {
   return true;
 }
 async function openFrame() {
-  if (frame.el) return;
+  if (frame.el || frame.opening) return;
+  frame.opening = true;
+  try { await buildFrame(); } finally { frame.opening = false; }
+}
+async function buildFrame() {
   const storyPics = (await stories()).filter((x) => x.photoId).map((x) => ({ id: x.photoId, caption: `${x.year ? x.year + ' · ' : ''}${x.title}`, from: '' }));
   const photos = [...(await galleryItems()).filter((m) => !isVideo(m)).slice(0, 60), ...storyPics];
   const slides = [];
@@ -2836,7 +2981,13 @@ async function openFrame() {
   frame.timer = setInterval(showSlide, 12000);
 }
 async function keepAwake() {
-  try { if (frame.el && navigator.wakeLock && !frame.wake) { frame.wake = await navigator.wakeLock.request('screen'); frame.wake.addEventListener('release', () => { frame.wake = null; }); } } catch { /* not supported */ }
+  if (!frame.el || !navigator.wakeLock || frame.wake || frame.waking) return;
+  frame.waking = navigator.wakeLock.request('screen');
+  try {
+    frame.wake = await frame.waking;
+    frame.wake.addEventListener('release', () => { frame.wake = null; });
+    if (!frame.el) { frame.wake.release().catch(() => {}); frame.wake = null; }
+  } catch { /* not supported */ } finally { frame.waking = null; }
 }
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') keepAwake(); });
 function closeFrame() {
@@ -2874,7 +3025,7 @@ async function showSlide() {
       el.className = '';
       const url = await mediaUrl(slide.m.id);
       layer.innerHTML = `<img class="fr-bg" src="${url}" alt=""><img class="fr-fg" src="${url}" alt="${esc(slide.m.caption || '')}">`;
-      cap.innerHTML = [slide.m.caption ? `<div class="fr-title">${esc(slide.m.caption)}</div>` : '', slide.m.from ? `<div>From ${esc(shortName(slide.m.from))}</div>` : ''].join('');
+      cap.innerHTML = [slide.m.caption ? `<div class="fr-title">${esc(slide.m.caption)}</div>` : '', slide.m.from ? `<div>From ${esc(sender(slide.m))}</div>` : ''].join('');
     } else {
       el.className = 'light';
       const done = items.filter((t) => doneMap.has(t.key)).length;
@@ -2926,20 +3077,22 @@ function startTimers() {
     return toast(hashParams.get('error_description').replace(/\+/g, ' '));
   }
   const q = new URLSearchParams(location.search);
-  const pairCode = (q.get('pair') || '').replace(/\D/g, '');
-  const inviteCode = (q.get('invite') || '').replace(/\D/g, '');
-  const pairCircle = linkCircle(q.get('c'));
-  if (inviteCode) { local('invite', inviteCode); local('inviteCircle', pairCircle); }
-  if (pairCode || inviteCode) history.replaceState(null, '', location.pathname + location.hash);
+  const pairRaw = (q.get('pair') || '').trim();
+  const pairToken = linkToken(pairRaw);
+  const pairCode = pairToken ? '' : pairRaw.replace(/\D/g, '');
+  const inviteRaw = (q.get('invite') || '').trim();
+  const inviteCode = linkToken(inviteRaw) || inviteRaw.replace(/\D/g, '');
+  if (inviteCode) local('invite', inviteCode);
+  if (pairRaw || inviteRaw) history.replaceState(null, '', location.pathname + location.hash);
 
   const { data: { session: s } } = await sb.auth.getSession();
   if (location.hash.includes('access_token') || location.hash.includes('type=')) history.replaceState(null, '', location.pathname);
-  if (!s) return pairCode ? showPair(pairCode, pairCircle) : inviteCode ? showEmail() : showWelcome();
+  if (!s) return pairToken || pairCode ? showPair(pairCode, pairToken) : inviteCode ? showEmail() : showWelcome();
   me = s.user;
-  if (pairCode) {
+  if (pairToken || pairCode) {
     if (!me.is_anonymous) return showFamilyHasLink();
     const { count } = await sb.from('members').select('user_id', { count: 'exact', head: true }).eq('user_id', me.id);
-    if (!count) return showPair(pairCode, pairCircle);
+    if (!count) return showPair(pairCode, pairToken);
   }
   try { await enterCircle(); } catch (err) { console.error(err); showProblem(`Couldn't load: ${err.message}`); }
 })();

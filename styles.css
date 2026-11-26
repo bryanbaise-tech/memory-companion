@@ -595,3 +595,14 @@ body.evening .plant .sway { animation-duration: 9s; }
 .idea-chips { display: flex; flex-wrap: wrap; gap: .4rem; }
 .chip { border: 1.5px solid var(--line); background: var(--card); border-radius: 999px; padding: .35rem .8rem; font: inherit; font-size: .88rem; font-weight: 600; color: var(--ink); cursor: pointer; }
 .chip:active { transform: scale(.97); }
+
+/* ---------- Utility classes (no inline styles, for the content-security policy) ---------- */
+.grow { flex: 1; }
+.min0 { min-width: 0; }
+.fixed { flex: none; }
+.row.tight { gap: .4rem; }
+.stat .n.bad { color: var(--shu); }
+.h2-gap { margin-top: .6rem; }
+.btn-row.flush { margin-top: 0; }
+.embed-spotify { height: 352px; } .embed-spotify-tall { height: 452px; }
+.embed-apple { height: 175px; } .embed-apple-tall { height: 450px; }

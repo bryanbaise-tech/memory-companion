@@ -1,14 +1,17 @@
 // Memory Companion — warm voice service (ElevenLabs).
 // The ElevenLabs key lives only here, as a server secret. Callers must be signed in
 // AND belong to a care circle, so nobody else can use up the voice allowance.
-// A caller may only use the account's narrator voices (premade or library voices) or
-// family voices cloned for a circle they belong to (public.voices, server-only).
-// Every phrase is cached in the private "voice" bucket, so repeats are free.
+// A caller may only use narrator voices (ElevenLabs premade voices, plus the library voices
+// listed in NARRATORS) or family voices cloned for a circle they belong to (public.voices,
+// server-only). Every phrase is cached in the private "voice" bucket under voice/<voiceId>/,
+// so repeats are free and a voice's clips can be removed with it.
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 const MODEL = "eleven_multilingual_v2"; // supports the speed setting
 const MAX_CHARS = 2500;
 const DAILY_CHARS = 20000; // per person per day, for new (uncached) speech
+// Library voices approved as narrators for every family (premade voices are always allowed).
+const NARRATORS = new Set(["3svOJAOhuPHXwQC2H5eq"]); // Brady J – Friendly, Casual, Warm
 const cors = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, apikey, content-type, x-client-info",
@@ -32,8 +35,7 @@ async function accountVoices(key: string): Promise<Voice[]> {
   voiceCache = { at: Date.now(), voices };
   return voices;
 }
-// Narrator voices: anything in the account that isn't someone's cloned or designed voice.
-const isNarrator = (v: Voice) => v.category !== "cloned" && v.category !== "generated";
+
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
@@ -53,9 +55,12 @@ Deno.serve(async (req) => {
   if (req.method === "GET" && url.searchParams.has("status")) return json({ enabled: !!key });
   if (!key) return json({ error: "Warm voice is not set up" }, 503);
 
-  // The family voices this caller may use: those cloned for one of their circles.
-  const { data: own } = await admin.from("voices").select("voice_id").in("circle_id", circles);
-  const ownIds = new Set((own || []).map((v) => v.voice_id as string));
+  // Family voices: the caller may use those cloned for one of their circles, and no one
+  // else's, even if ElevenLabs labels a clone as something other than "cloned".
+  const { data: allFamily } = await admin.from("voices").select("voice_id, circle_id");
+  const familyIds = new Set((allFamily || []).map((v) => v.voice_id as string));
+  const ownIds = new Set((allFamily || []).filter((v) => circles.includes(v.circle_id as string)).map((v) => v.voice_id as string));
+  const isNarrator = (v: Voice) => !familyIds.has(v.voice_id) && (v.category === "premade" || NARRATORS.has(v.voice_id));
 
   let voices: Voice[];
   try { voices = await accountVoices(key); } catch (err) {
@@ -79,10 +84,14 @@ Deno.serve(async (req) => {
   const voiceId = String(body.voiceId || "").replace(/[^A-Za-z0-9]/g, "");
   const speed = Math.min(1.2, Math.max(0.7, Number(body.speed) || 0.9));
   if (!text || !voiceId) return json({ error: "Missing text or voice" }, 400);
-  const voice = voices.find((v) => v.voice_id === voiceId);
-  if (!voice || !allowed(voice)) return json({ error: "That voice isn't available to this family" }, 403);
+  // Own family voices are allowed straight from the table (a brand-new clone may not be in
+  // the cached account list yet); narrators must be in the account list.
+  if (!ownIds.has(voiceId)) {
+    const voice = voices.find((v) => v.voice_id === voiceId);
+    if (!voice || !isNarrator(voice)) return json({ error: "That voice isn't available to this family" }, 403);
+  }
 
-  const path = `${await sha256(`${MODEL}|${voiceId}|${speed}|${text}`)}.mp3`;
+  const path = `${voiceId}/${await sha256(`${MODEL}|${voiceId}|${speed}|${text}`)}.mp3`;
   const cached = await admin.storage.from("voice").download(path);
   if (cached.data) return new Response(cached.data, { headers: { ...cors, "Content-Type": "audio/mpeg" } });
 

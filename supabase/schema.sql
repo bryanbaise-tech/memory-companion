@@ -44,6 +44,8 @@ create table if not exists public.code_attempts (
 );
 create index if not exists code_attempts_idx on public.code_attempts(user_id, at);
 alter table public.codes add column if not exists created_at timestamptz not null default now();
+alter table public.codes add column if not exists token text;
+create unique index if not exists codes_token_idx on public.codes(token);
 alter table public.code_attempts add column if not exists ok boolean not null default false;
 alter table public.code_attempts add column if not exists with_circle boolean not null default false;
 alter table public.code_attempts add column if not exists circle_id uuid;
@@ -77,7 +79,6 @@ drop policy if exists circles_update on public.circles;
 drop policy if exists circles_delete on public.circles;
 create policy circles_select on public.circles for select to authenticated using (public.is_member(id));
 create policy circles_update on public.circles for update to authenticated using (public.is_family(id)) with check (public.is_family(id));
-create policy circles_delete on public.circles for delete to authenticated using (public.is_family(id));
 
 drop policy if exists members_select on public.members;
 drop policy if exists members_delete on public.members;
@@ -111,6 +112,42 @@ begin
   new.updated_at := now();
   return new;
 end $$;
+alter table public.items add column if not exists created_by uuid;
+create or replace function public.guard_item() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if tg_op = 'UPDATE' then
+    if new.circle_id <> old.circle_id or new.store <> old.store or new.id <> old.id then
+      raise exception 'Items cannot be moved or renamed';
+    end if;
+    new.created_by := old.created_by;
+    -- A deleted item stays deleted: a stale copy written by any phone can't bring it back.
+    -- Family can restore on purpose (data.restore = true). Check-offs may be undone freely.
+    if old.data->>'deleted' = 'true' and coalesce(new.data->>'deleted', '') <> 'true' and old.store <> 'completions' then
+      if new.data->>'restore' = 'true' and public.is_family(old.circle_id) then
+        new.data := new.data - 'restore' - 'deleted' - 'deletedAt';
+      else
+        new.data := old.data;
+      end if;
+    end if;
+    new.data := new.data - 'restore';
+  else
+    new.created_by := auth.uid();
+    if exists (select 1 from items where circle_id = new.circle_id and store = new.store and id = new.id) then
+      -- An upsert onto an existing row: the UPDATE branch above decides (and strips "restore").
+      return new;
+    end if;
+    if (select count(*) from items where circle_id = new.circle_id) >= 20000 then
+      raise exception 'This care circle has reached its storage limit.';
+    end if;
+    new.data := new.data - 'restore';
+  end if;
+  return new;
+end $$;
+drop trigger if exists items_guard on public.items;
+create trigger items_guard before insert or update on public.items
+  for each row execute function public.guard_item();
+revoke all on function public.guard_item() from public, anon, authenticated;
 drop trigger if exists items_stamp on public.items;
 create trigger items_stamp before insert or update on public.items
   for each row execute function public.stamp_item();
@@ -129,9 +166,10 @@ begin
   return c;
 end $$;
 
+drop function if exists public.make_code(uuid, text);
 create or replace function public.make_code(p_circle uuid, p_role text)
-returns text language plpgsql security definer set search_path = public as $$
-declare k text; tries int := 0;
+returns json language plpgsql security definer set search_path = public as $$
+declare k text; t text; tries int := 0;
 begin
   if not public.is_family(p_circle) then raise exception 'Only family can create codes'; end if;
   if p_role not in ('family', 'device') then raise exception 'Unknown role'; end if;
@@ -144,37 +182,38 @@ begin
     k := lpad(((('x' || encode(extensions.gen_random_bytes(4), 'hex'))::bit(32)::bigint) % 100000000)::text, 8, '0');
     exit when not exists (select 1 from codes where code = k);
   end loop;
-  insert into codes (code, circle_id, role, expires_at) values (k, p_circle, p_role, now() + interval '24 hours');
-  return k;
+  t := encode(extensions.gen_random_bytes(16), 'hex');  -- 128-bit token for links and QR codes
+  insert into codes (code, circle_id, role, expires_at, token) values (k, p_circle, p_role, now() + interval '24 hours', t);
+  return json_build_object('code', k, 'token', t);
 end $$;
 
--- Links and QR codes carry the circle id and an 8-digit code. A code typed by hand
--- (no circle id) only works in its first 30 minutes. Wrong guesses are limited per
--- account (10/hour) and, for links, per target circle (30/hour). Failures return null
--- (not an error) so the attempt is recorded and counts toward the limits.
+-- Links and QR codes carry a 128-bit random token (never typed, can't be guessed).
+-- A code typed by hand is 8 digits and only works in its first 30 minutes. Wrong
+-- guesses are limited per account (10/hour). Failures return null (not an error)
+-- so the attempt is recorded and counts toward the limit.
 drop function if exists public.redeem_code(text, text);
-create or replace function public.redeem_code(p_code text, p_display text, p_circle uuid default null)
+drop function if exists public.redeem_code(text, text, uuid);
+create or replace function public.redeem_code(p_code text, p_display text, p_token text default null)
 returns uuid language plpgsql security definer set search_path = public as $$
-declare r codes%rowtype; k text := regexp_replace(coalesce(p_code, ''), '\D', '', 'g');
+declare r codes%rowtype;
+  k text := regexp_replace(coalesce(p_code, ''), '\D', '', 'g');
+  tk text := lower(regexp_replace(coalesce(p_token, ''), '[^0-9a-fA-F]', '', 'g'));
 begin
   if auth.uid() is null then raise exception 'Not signed in'; end if;
   delete from code_attempts where at < now() - interval '1 day';
   if (select count(*) from code_attempts where user_id = auth.uid() and not ok and at > now() - interval '1 hour') >= 10 then
     raise exception 'Too many tries. Please wait an hour and try again.';
   end if;
-  if p_circle is not null and (select count(*) from code_attempts where circle_id = p_circle and not ok and at > now() - interval '1 hour') >= 30 then
-    raise exception 'Too many tries for this family just now. Please ask for a new link in an hour.';
-  end if;
-  if p_circle is null then
-    select * into r from codes where code = k and expires_at > now() and created_at > now() - interval '30 minutes';
+  if length(tk) = 32 then
+    select * into r from codes where token = tk and expires_at > now();
   else
-    select * into r from codes where code = k and circle_id = p_circle and expires_at > now();
+    select * into r from codes where code = k and expires_at > now() and created_at > now() - interval '30 minutes';
   end if;
   if not found or (r.role = 'family' and public.is_anonymous()) then
-    insert into code_attempts (user_id, ok, with_circle, circle_id) values (auth.uid(), false, p_circle is not null, p_circle);
+    insert into code_attempts (user_id, ok, with_circle) values (auth.uid(), false, length(tk) = 32);
     return null;
   end if;
-  insert into code_attempts (user_id, ok, with_circle, circle_id) values (auth.uid(), true, p_circle is not null, r.circle_id);
+  insert into code_attempts (user_id, ok, with_circle, circle_id) values (auth.uid(), true, length(tk) = 32, r.circle_id);
   insert into members (circle_id, user_id, role, display_name)
   values (r.circle_id, auth.uid(), r.role, left(coalesce(p_display, ''), 60))
   -- Never turn a family member into a device by accident.
@@ -187,10 +226,10 @@ end $$;
 
 revoke all on function public.create_circle(text, text) from public, anon;
 revoke all on function public.make_code(uuid, text) from public, anon;
-revoke all on function public.redeem_code(text, text, uuid) from public, anon;
+revoke all on function public.redeem_code(text, text, text) from public, anon;
 grant execute on function public.create_circle(text, text) to authenticated;
 grant execute on function public.make_code(uuid, text) to authenticated;
-grant execute on function public.redeem_code(text, text, uuid) to authenticated;
+grant execute on function public.redeem_code(text, text, text) to authenticated;
 
 -- ---------------------------------------------------------------- live updates
 do $$ begin
@@ -204,7 +243,7 @@ alter publication supabase_realtime set (publish = 'insert, update');
 insert into storage.buckets (id, name, public, file_size_limit)
 values ('media', 'media', false, 52428800)
 on conflict (id) do nothing;
-update storage.buckets set allowed_mime_types = array['image/*', 'video/*', 'audio/*'] where id = 'media';
+update storage.buckets set allowed_mime_types = array['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif', 'image/gif', 'video/*', 'audio/*'] where id = 'media';
 insert into storage.buckets (id, name, public)
 values ('voice', 'voice', false)
 on conflict (id) do nothing;
@@ -225,12 +264,21 @@ exception when others then
   return false;
 end $$;
 
+-- At most 3000 files per circle, so a stolen phone can't fill the whole plan.
+create or replace function public.media_quota_ok(p text) returns boolean
+language plpgsql security definer stable set search_path = public, storage as $$
+begin
+  return (select count(*) from storage.objects where bucket_id = 'media' and name like split_part(p, '/', 1) || '/%') < 3000;
+exception when others then
+  return false;
+end $$;
+
 drop policy if exists media_select on storage.objects;
 drop policy if exists media_insert on storage.objects;
 drop policy if exists media_update on storage.objects;
 drop policy if exists media_delete on storage.objects;
 create policy media_select on storage.objects for select to authenticated using (bucket_id = 'media' and public.member_of_path(name));
-create policy media_insert on storage.objects for insert to authenticated with check (bucket_id = 'media' and public.member_of_path(name));
+create policy media_insert on storage.objects for insert to authenticated with check (bucket_id = 'media' and public.member_of_path(name) and public.media_quota_ok(name));
 create policy media_update on storage.objects for update to authenticated using (bucket_id = 'media' and public.family_of_path(name));
 create policy media_delete on storage.objects for delete to authenticated using (bucket_id = 'media' and public.family_of_path(name));
 -- The 'voice' bucket has no policies: only the voice function (server side) can use it.
@@ -239,7 +287,8 @@ create policy media_delete on storage.objects for delete to authenticated using 
 -- (Row-level security above still decides WHICH rows each person can touch.)
 grant usage on schema public to anon, authenticated, service_role;
 grant select, insert, update, delete on public.items to authenticated;
-grant select, delete on public.circles to authenticated;
+grant select on public.circles to authenticated;
+revoke delete on public.circles from authenticated;  -- only the deletecircle function (service role) deletes
 revoke update on public.circles from authenticated;
 grant update (name) on public.circles to authenticated;
 grant select, delete on public.members to authenticated;
@@ -262,6 +311,18 @@ create table if not exists public.voices (
   created_at timestamptz not null default now()
 );
 create index if not exists voices_circle_idx on public.voices(circle_id);
+create or replace function public.voices_cap() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  perform pg_advisory_xact_lock(hashtext('voices:' || new.circle_id::text));
+  if (select count(*) from voices where circle_id = new.circle_id) >= 6 then
+    raise exception 'This family already has 6 voices.';
+  end if;
+  return new;
+end $$;
+drop trigger if exists voices_cap on public.voices;
+create trigger voices_cap before insert on public.voices for each row execute function public.voices_cap();
+revoke all on function public.voices_cap() from public, anon, authenticated;
 
 -- Warm-voice spending: characters synthesized per user per day (cache hits are free).
 create table if not exists public.tts_usage (
@@ -293,6 +354,7 @@ grant execute on function public.tts_charge(uuid, int, int) to service_role;
 create or replace function public.keep_last_family() returns trigger
 language plpgsql security definer set search_path = public as $$
 begin
+  perform pg_advisory_xact_lock(hashtext(old.circle_id::text));
   if old.role = 'family'
      and exists (select 1 from circles where id = old.circle_id)
      and not exists (select 1 from members where circle_id = old.circle_id and role = 'family' and user_id <> old.user_id) then
@@ -312,8 +374,25 @@ revoke all on function public.keep_last_family() from public, anon, authenticate
 create extension if not exists pg_cron;
 select cron.unschedule(jobid) from cron.job where jobname in ('mc-purge-tombstones', 'mc-purge-anonymous');
 select cron.schedule('mc-purge-tombstones', '17 3 * * *',
-  $$delete from public.items where data->>'deleted' = 'true' and updated_at < now() - interval '30 days'$$);
+  $$delete from public.items where data->>'deleted' = 'true' and store <> 'media' and updated_at < now() - interval '30 days'$$);
 -- Anonymous accounts that never paired with a circle are removed after 30 days.
 select cron.schedule('mc-purge-anonymous', '27 3 * * *',
   $$delete from auth.users u where u.is_anonymous and u.created_at < now() - interval '30 days'
     and not exists (select 1 from public.members m where m.user_id = u.id)$$);
+
+-- Nightly housekeeping function (files can't be deleted from SQL): removes files of photos
+-- deleted 30+ days ago and voice clips older than 90 days. The secret lives only in
+-- public.server_secrets (no client grants) and in the function's environment.
+create extension if not exists pg_net;
+create table if not exists public.server_secrets (name text primary key, value text not null);
+alter table public.server_secrets enable row level security;
+revoke all on public.server_secrets from anon, authenticated;
+select cron.unschedule(jobid) from cron.job where jobname = 'mc-housekeeping';
+select cron.schedule('mc-housekeeping', '37 3 * * *', $$
+  select net.http_post(
+    url := 'https://hekxmgammddlkdxtjvfd.supabase.co/functions/v1/housekeeping',
+    headers := jsonb_build_object('Content-Type', 'application/json',
+      'Authorization', 'Bearer ' || (select value from public.server_secrets where name = 'anon_key'),
+      'x-cron-secret', (select value from public.server_secrets where name = 'cron_secret')),
+    body := '{}'::jsonb)
+$$);

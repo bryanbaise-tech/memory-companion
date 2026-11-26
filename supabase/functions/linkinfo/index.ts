@@ -50,7 +50,14 @@ Deno.serve(async (req) => {
       return json({ title: d.title || "", artist: "", thumb: d.thumbnail_url || "" });
     }
     // Apple Music has no public lookup, so read the page's title and cover picture.
-    const r = await fetch(url.href, { headers: { "User-Agent": "Mozilla/5.0 (compatible; MemoryCompanion/1.0)" }, redirect: "manual", signal: AbortSignal.timeout(8000) });
+    // Apple redirects some links to a regional page; follow up to 3 hops, Apple hosts only.
+    let r = await fetch(url.href, { headers: { "User-Agent": "Mozilla/5.0 (compatible; MemoryCompanion/1.0)" }, redirect: "manual", signal: AbortSignal.timeout(8000) });
+    for (let hop = 0; hop < 3 && r.status >= 300 && r.status < 400; hop++) {
+      let next: URL;
+      try { next = new URL(r.headers.get("location") || "", url.href); } catch { break; }
+      if (next.protocol !== "https:" || !/^(music|embed\.music)\.apple\.com$/i.test(next.hostname)) break;
+      r = await fetch(next.href, { headers: { "User-Agent": "Mozilla/5.0 (compatible; MemoryCompanion/1.0)" }, redirect: "manual", signal: AbortSignal.timeout(8000) });
+    }
     if (!r.ok) return json({ error: "Couldn't find that on Apple Music" }, 404);
     const html = (await r.text()).slice(0, 400000);
     const title = meta(html, "apple:title");
