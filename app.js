@@ -1194,7 +1194,7 @@ async function careCircle() {
       <p>Takes about a minute. Nobody types passwords or web addresses.</p>
       <button class="btn primary big" data-action="make-code" data-id="device">Start</button>
     </div>` : (() => {
-      const url = `${appUrl}?pair=${deviceCode}`;
+      const url = `${appUrl}?pair=${deviceCode}&c=${circleId}`;
       return `
     <div class="paper">
       <h2>Set up ${whose} phone or tablet</h2>
@@ -1225,7 +1225,7 @@ async function careCircle() {
       <p class="hint">They'll be able to send messages and photos, and see what's done each day. Everyone signs in with their own email.</p>
       <button class="btn" data-action="make-code" data-id="family">Invite someone</button>
     </div>` : (() => {
-      const url = `${appUrl}?invite=${famCode}`;
+      const url = `${appUrl}?invite=${famCode}&c=${circleId}`;
       return `
     <div class="paper">
       <h2>Invite a relative</h2>
@@ -1987,8 +1987,9 @@ document.addEventListener('submit', async (e) => {
           if (error) { toast(error.message); break; }
           me = data.user;
         }
-        const { error } = await sb.rpc('redeem_code', { p_code: val(fd, 'code'), p_display: val(fd, 'device') || 'Companion device' });
+        const { data: joined, error } = await sb.rpc('redeem_code', { p_code: val(fd, 'code'), p_display: val(fd, 'device') || 'Companion device', p_circle: linkCircle(fd.get('circle')) });
         if (error) { toast(error.message); break; }
+        if (!joined) { toast(fd.get('circle') ? 'That link has expired or was already used. Ask for a new one.' : 'That code is not right or has expired. Typed codes work for 30 minutes.'); break; }
         await enterCircle();
         break;
       }
@@ -2004,9 +2005,11 @@ document.addEventListener('submit', async (e) => {
         break;
       }
       case 'join-family': {
-        const { error } = await sb.rpc('redeem_code', { p_code: val(fd, 'code'), p_display: val(fd, 'me') });
+        const viaLink = fd.get('code') === local('invite') ? local('inviteCircle') : null;
+        const { data: joined, error } = await sb.rpc('redeem_code', { p_code: val(fd, 'code'), p_display: val(fd, 'me'), p_circle: linkCircle(viaLink) });
         if (error) { toast(error.message); break; }
-        local('invite', null);
+        if (!joined) { toast(viaLink ? 'That invite has expired or was already used. Ask for a new one.' : 'That code is not right or has expired. Typed codes work for 30 minutes.'); break; }
+        local('invite', null); local('inviteCircle', null);
         await enterCircle();
         break;
       }
@@ -2293,12 +2296,14 @@ function showCheckEmail(email) {
       <button class="btn ghost" data-action="welcome-family">‹ Use a different email</button>
     </div>`;
 }
-function showPair(code = '') {
+// The circle id that pairing/invite links carry (a UUID), or null.
+const linkCircle = (v) => (/^[0-9a-f-]{36}$/i.test(String(v || '')) ? String(v) : null);
+function showPair(code = '', circle = null) {
   const ready = /^\d{6}$/.test(code);
   $app.innerHTML = welcomeHero(ready ? 'Almost done' : 'Pair this phone', ready ? 'One tap and this phone is ready.' : 'Ask a family member for a 6-digit code.') + `
     <form class="paper stack" data-form="pair-code">
       ${ready ? `<p class="ready-text">Your family has set up a companion for you. Tap the button below.</p>
-        <input type="hidden" name="code" value="${esc(code)}">`
+        <input type="hidden" name="code" value="${esc(code)}">${circle ? `<input type="hidden" name="circle" value="${esc(circle)}">` : ''}`
       : `<p>A family member gets the code in <b>Family tools → Family &amp; devices</b>.</p>
         <label>Pairing code <input type="text" name="code" required inputmode="numeric" autocomplete="one-time-code" maxlength="7" class="code-input" placeholder="123 456" autofocus></label>
         <label>Name this device <span class="hint">(optional)</span><input type="text" name="device" maxlength="40" placeholder="e.g. Mom's iPad"></label>`}
@@ -2399,17 +2404,18 @@ function startTimers() {
   const q = new URLSearchParams(location.search);
   const pairCode = (q.get('pair') || '').replace(/\D/g, '');
   const inviteCode = (q.get('invite') || '').replace(/\D/g, '');
-  if (inviteCode) local('invite', inviteCode);
+  const pairCircle = linkCircle(q.get('c'));
+  if (inviteCode) { local('invite', inviteCode); local('inviteCircle', pairCircle); }
   if (pairCode || inviteCode) history.replaceState(null, '', location.pathname + location.hash);
 
   const { data: { session: s } } = await sb.auth.getSession();
   if (location.hash.includes('access_token') || location.hash.includes('type=')) history.replaceState(null, '', location.pathname);
-  if (!s) return pairCode ? showPair(pairCode) : inviteCode ? showEmail() : showWelcome();
+  if (!s) return pairCode ? showPair(pairCode, pairCircle) : inviteCode ? showEmail() : showWelcome();
   me = s.user;
   if (pairCode) {
     if (!me.is_anonymous) return showFamilyHasLink();
     const { count } = await sb.from('members').select('user_id', { count: 'exact', head: true }).eq('user_id', me.id);
-    if (!count) return showPair(pairCode);
+    if (!count) return showPair(pairCode, pairCircle);
   }
   try { await enterCircle(); } catch (err) { console.error(err); showProblem(`Couldn't load: ${err.message}`); }
 })();

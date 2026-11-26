@@ -43,6 +43,9 @@ create table if not exists public.code_attempts (
   at timestamptz not null default now()
 );
 create index if not exists code_attempts_idx on public.code_attempts(user_id, at);
+alter table public.codes add column if not exists created_at timestamptz not null default now();
+alter table public.code_attempts add column if not exists ok boolean not null default false;
+alter table public.code_attempts add column if not exists with_circle boolean not null default false;
 
 -- ---------------------------------------------------------------- helpers
 create or replace function public.is_member(c uuid) returns boolean
@@ -84,6 +87,18 @@ create policy members_update_self on public.members for update to authenticated 
 drop policy if exists items_all on public.items;
 create policy items_all on public.items for all to authenticated
   using (public.is_member(circle_id)) with check (public.is_member(circle_id));
+
+-- Record who changed each item and when; the client can't fake either.
+create or replace function public.stamp_item() returns trigger
+language plpgsql set search_path = public as $$
+begin
+  new.updated_by := auth.uid();
+  new.updated_at := now();
+  return new;
+end $$;
+drop trigger if exists items_stamp on public.items;
+create trigger items_stamp before insert or update on public.items
+  for each row execute function public.stamp_item();
 -- codes and code_attempts: no direct access; only through the functions below.
 
 -- ---------------------------------------------------------------- actions
@@ -101,34 +116,50 @@ end $$;
 
 create or replace function public.make_code(p_circle uuid, p_role text)
 returns text language plpgsql security definer set search_path = public as $$
-declare k text;
+declare k text; tries int := 0;
 begin
   if not public.is_family(p_circle) then raise exception 'Only family can create codes'; end if;
   if p_role not in ('family', 'device') then raise exception 'Unknown role'; end if;
   delete from codes where expires_at < now();
+  -- At most 3 live codes per circle: making a new one retires the oldest.
+  delete from codes where code in (select code from codes where circle_id = p_circle order by created_at desc offset 2);
   loop
-    k := lpad((floor(random() * 1000000))::int::text, 6, '0');
+    tries := tries + 1;
+    if tries > 20 then raise exception 'Could not make a code just now. Please try again.'; end if;
+    k := lpad(((('x' || encode(extensions.gen_random_bytes(4), 'hex'))::bit(32)::bigint) % 1000000)::text, 6, '0');
     exit when not exists (select 1 from codes where code = k);
   end loop;
-  insert into codes (code, circle_id, role) values (k, p_circle, p_role);
+  insert into codes (code, circle_id, role, expires_at) values (k, p_circle, p_role, now() + interval '24 hours');
   return k;
 end $$;
 
-create or replace function public.redeem_code(p_code text, p_display text)
+-- Links and QR codes carry the circle id, so a leaked 6-digit code alone is useless.
+-- A code typed by hand (no circle id) only works in its first 30 minutes, with a
+-- cap on wrong guesses across everyone. Failures return null (not an error) so
+-- the attempt is recorded and counts toward the limits.
+drop function if exists public.redeem_code(text, text);
+create or replace function public.redeem_code(p_code text, p_display text, p_circle uuid default null)
 returns uuid language plpgsql security definer set search_path = public as $$
-declare r codes%rowtype;
+declare r codes%rowtype; k text := regexp_replace(coalesce(p_code, ''), '\D', '', 'g');
 begin
   if auth.uid() is null then raise exception 'Not signed in'; end if;
-  -- Slow down guessing: at most 10 tries per hour per account.
-  if (select count(*) from code_attempts where user_id = auth.uid() and at > now() - interval '1 hour') >= 10 then
+  delete from code_attempts where at < now() - interval '1 day';
+  if (select count(*) from code_attempts where user_id = auth.uid() and not ok and at > now() - interval '1 hour') >= 10 then
     raise exception 'Too many tries. Please wait an hour and try again.';
   end if;
-  insert into code_attempts (user_id) values (auth.uid());
-  select * into r from codes where code = regexp_replace(coalesce(p_code, ''), '\D', '', 'g') and expires_at > now();
-  if not found then raise exception 'That code is not right or has expired'; end if;
-  if r.role = 'family' and public.is_anonymous() then
-    raise exception 'Please sign in with your email to join as family';
+  if p_circle is null and (select count(*) from code_attempts where not ok and not with_circle and at > now() - interval '1 hour') >= 200 then
+    raise exception 'Too many tries right now. Please use the link or QR code instead, or try again later.';
   end if;
+  if p_circle is null then
+    select * into r from codes where code = k and expires_at > now() and created_at > now() - interval '30 minutes';
+  else
+    select * into r from codes where code = k and circle_id = p_circle and expires_at > now();
+  end if;
+  if not found or (r.role = 'family' and public.is_anonymous()) then
+    insert into code_attempts (user_id, ok, with_circle) values (auth.uid(), false, p_circle is not null);
+    return null;
+  end if;
+  insert into code_attempts (user_id, ok, with_circle) values (auth.uid(), true, p_circle is not null);
   insert into members (circle_id, user_id, role, display_name)
   values (r.circle_id, auth.uid(), r.role, coalesce(p_display, ''))
   -- Never turn a family member into a device by accident.
@@ -141,10 +172,10 @@ end $$;
 
 revoke all on function public.create_circle(text, text) from public, anon;
 revoke all on function public.make_code(uuid, text) from public, anon;
-revoke all on function public.redeem_code(text, text) from public, anon;
+revoke all on function public.redeem_code(text, text, uuid) from public, anon;
 grant execute on function public.create_circle(text, text) to authenticated;
 grant execute on function public.make_code(uuid, text) to authenticated;
-grant execute on function public.redeem_code(text, text) to authenticated;
+grant execute on function public.redeem_code(text, text, uuid) to authenticated;
 
 -- ---------------------------------------------------------------- live updates
 do $$ begin
@@ -180,6 +211,15 @@ create policy media_delete on storage.objects for delete to authenticated using 
 -- ---------------------------------------------------------------- table permissions
 -- (Row-level security above still decides WHICH rows each person can touch.)
 grant usage on schema public to anon, authenticated, service_role;
-grant select, insert, update, delete on public.circles, public.members, public.items to authenticated;
+grant select, insert, update, delete on public.items to authenticated;
+grant select, update, delete on public.circles to authenticated;
+grant select, delete on public.members to authenticated;
+-- Circles and memberships are only created inside create_circle / redeem_code, and a
+-- member may change nothing about their own row except their display name.
+revoke insert on public.circles from authenticated;
+revoke insert, update on public.members from authenticated;
+grant update (display_name) on public.members to authenticated;
+revoke all on public.codes, public.code_attempts from anon, authenticated;
+revoke all on public.circles, public.members, public.items from anon;
 grant all on public.circles, public.members, public.items, public.codes, public.code_attempts to service_role;
 revoke truncate, trigger, references on public.circles, public.members, public.items, public.codes, public.code_attempts from anon, authenticated;

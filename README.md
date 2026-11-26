@@ -63,4 +63,6 @@ the new photo-and-faces look, and the growing flower and garden.
      relative deletes their account, what happens to photos and messages they
      shared? Suggested: they stay with the family unless the person also chooses
      "delete what I shared"; deleting the whole family circle removes everything.
+     Decided: use this rule. Deleting a circle must also delete media/<circle_id>/*
+     in storage on the server side (today only the app's reset button does it).
 6. **App Store** release, which needs the Apple Developer Program ($99 a year).
