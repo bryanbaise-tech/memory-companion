@@ -46,19 +46,21 @@ model here.
 
 ## Roadmap
 
-Done: shared backend, family voices, music links, who-sent-it labels on photos.
+Done: shared backend, family voices, music links, who-sent-it labels on photos,
+the new photo-and-faces look, and the growing flower and garden.
 
-1. **New look**: photo and faces first, soft colors, readable type (in progress).
-2. **Mom can reply**: a heart button and voice notes back to the sender, plus "Mom saw it."
-3. **Picture-frame mode**: an idle slideshow with a big clock, dimmed at night.
-4. **Evening calm mode**: warmer screen, music and a familiar voice from late afternoon.
-5. **Life story** and "On this day."
-6. **Native iPhone milestone**, done as one piece:
+1. **Mom can reply**: a heart button and voice notes back to the sender, plus "Mom saw it."
+2. **Picture-frame mode**: an idle slideshow with a big clock, dimmed at night.
+   Includes a view of her flower garden filling up over the weeks.
+3. **Evening calm mode**: warmer screen, music and a familiar voice from late afternoon.
+4. **Life story** and "On this day."
+5. **Native iPhone milestone**, done as one piece:
    - a Swift app that wraps the web app, with the web files bundled inside so it opens offline
-   - real notifications, including "Mom missed her pills" alerts to family
+   - real notifications, including "Mom missed her pills" alerts to family and
+     a happy "Mom's flower bloomed today 🌸" note
    - a share extension, so family can send photos from the Photos app
    - in-app account deletion (Apple requires it). Decision still needed: when a
      relative deletes their account, what happens to photos and messages they
      shared? Suggested: they stay with the family unless the person also chooses
      "delete what I shared"; deleting the whole family circle removes everything.
-7. **App Store** release, which needs the Apple Developer Program ($99 a year).
+6. **App Store** release, which needs the Apple Developer Program ($99 a year).
