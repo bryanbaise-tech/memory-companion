@@ -479,3 +479,21 @@ details.how p { margin: .5rem 0 0; font-size: .92rem; }
 .thumb { position: relative; }
 .new-pill.on-photo { position: absolute; top: .5rem; left: .5rem; margin: 0; box-shadow: 0 2px 8px rgba(0,0,0,.25); }
 .cap-from { display: block; font-weight: 500; font-size: .82rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+
+/* ---------- The growing flower ---------- */
+.garden-card { margin-top: 0 !important; }
+.garden-row { display: flex; align-items: center; gap: 1rem; }
+.plant { width: 5.6rem; height: auto; flex: none; overflow: visible; }
+.garden-title { font-family: var(--serif); font-size: 1.35rem; font-weight: 600; line-height: 1.2; }
+.garden-sub { color: var(--muted); margin-top: .2rem; }
+.garden-strip { display: flex; flex-wrap: wrap; align-items: center; gap: .15rem; margin-top: .7rem; padding-top: .7rem; border-top: 1px solid var(--line); }
+.garden-strip span { margin-left: .4rem; color: var(--muted); font-size: .9rem; font-weight: 600; }
+.mini-flower { width: 1.35rem; height: 1.35rem; }
+.plant .sway { transform-origin: 50px 90px; animation: sway 6s ease-in-out infinite; }
+@keyframes sway { 0%, 100% { transform: rotate(-1.5deg); } 50% { transform: rotate(1.5deg); } }
+.just-bloomed .petals { transform-box: fill-box; transform-origin: center; animation: bloom 1.4s cubic-bezier(.2, .9, .3, 1.2) both; }
+.just-bloomed .sparkle { animation: twinkle 1.6s ease-out .6s both; }
+@keyframes bloom { from { transform: scale(.15) rotate(-40deg); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes twinkle { 0% { opacity: 0; transform: scale(.4); } 60% { opacity: 1; } 100% { opacity: 1; transform: none; } }
+.plant .sparkle { transform-box: fill-box; transform-origin: center; }
+@media (prefers-reduced-motion: reduce) { .plant .sway, .just-bloomed .petals, .just-bloomed .sparkle { animation: none; } }

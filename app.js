@@ -534,6 +534,58 @@ async function todayItems() {
   return { items, doneMap };
 }
 
+// ================================================================ the growing flower
+// Today's flower grows with each finished task and blooms when everything is done.
+// It never wilts: a bloom is added to the garden for good, and missed days just add nothing.
+const FLOWER_COLORS = ['#e48aa0', '#f2a46b', '#e9c74f', '#b48ad6', '#ef8a7a', '#7fb0d9'];
+const flowerColor = (day = dayKey()) => FLOWER_COLORS[Math.floor(parseDay(day).getTime() / 86400000) % FLOWER_COLORS.length];
+function growthStage(done, total) {
+  if (!total) return 0;
+  if (done >= total) return 6;
+  if (!done) return 0;
+  return Math.min(5, Math.ceil((done / total) * 5)); // first task always shows a sprout
+}
+function plantSVG(stage, color = flowerColor()) {
+  const h = [4, 16, 28, 40, 50, 56, 58][stage];
+  const top = 90 - h;
+  const leaf = (y, a, sc = 1) => `<path class="leaf" d="M0 0 C6 -7 17 -7 22 0 C17 7 6 7 0 0Z" transform="translate(50 ${y}) rotate(${a}) scale(${sc})"/>`;
+  const leaves = stage === 0 ? '' : stage === 1 ? leaf(top + 3, -35, .55) + leaf(top + 3, -145, .55)
+    : stage === 2 ? leaf(top + 8, -30, .8) + leaf(top + 12, -150, .8)
+    : leaf(top + 14, -28) + leaf(top + 20, -152) + leaf(top + 32, -20, .85) + leaf(top + 38, -160, .85);
+  let head = '';
+  if (stage === 4) head = `<path d="M50 ${top - 12} C57 ${top - 6} 57 ${top + 2} 50 ${top + 3} C43 ${top + 2} 43 ${top - 6} 50 ${top - 12}Z" fill="${color}"/>`;
+  if (stage === 5) head = [-30, 0, 30].map((a) => `<ellipse cx="50" cy="${top - 8}" rx="6" ry="11" fill="${color}" transform="rotate(${a} 50 ${top})"/>`).join('');
+  if (stage === 6) head = `<g class="petals">${[0, 60, 120, 180, 240, 300].map((a) => `<ellipse cx="50" cy="${top - 11}" rx="7.5" ry="12" fill="${color}" transform="rotate(${a} 50 ${top})"/>`).join('')}
+    <circle cx="50" cy="${top}" r="7" fill="#f6d36b"/><circle cx="50" cy="${top}" r="3.2" fill="#d99a2b"/></g>
+    <g class="sparkle" fill="#e9b949"><path d="M18 30 l2 5 5 2 -5 2 -2 5 -2 -5 -5 -2 5 -2z"/><path d="M80 22 l1.5 4 4 1.5 -4 1.5 -1.5 4 -1.5 -4 -4 -1.5 4 -1.5z"/></g>`;
+  return `<svg class="plant stage-${stage}" viewBox="0 0 100 124" aria-hidden="true">
+    <g class="sway">${stage ? `<path d="M50 90 Q${stage > 2 ? 47 : 49} ${90 - h / 2} 50 ${top}" stroke="#5e8a4c" stroke-width="3.2" fill="none" stroke-linecap="round"/>` : `<ellipse cx="50" cy="86" rx="4" ry="3" fill="#7aa35f"/>`}
+    <g fill="#6f9a5b">${leaves}</g>${head}</g>
+    <ellipse cx="50" cy="91" rx="27" ry="5" fill="#7a5340"/>
+    <path d="M22 92 H78 L72 120 H28 Z" fill="#d98a64"/><rect x="19" y="88" width="62" height="9" rx="4" fill="#c9774f"/>
+  </svg>`;
+}
+const miniFlower = (color) => `<svg class="mini-flower" viewBox="0 0 24 24" aria-hidden="true">${[0, 72, 144, 216, 288].map((a) => `<ellipse cx="12" cy="6.5" rx="3.6" ry="5.5" fill="${color}" transform="rotate(${a} 12 12)"/>`).join('')}<circle cx="12" cy="12" r="3.2" fill="#f6d36b"/></svg>`;
+async function gardenHtml(done, total, link = true) {
+  if (!total) return '';
+  const stage = growthStage(done, total);
+  const blooms = (await all('garden')).sort((a, b) => a.date.localeCompare(b.date));
+  const title = stage === 6 ? 'Your flower bloomed!' : done ? 'Your flower is growing' : 'Your flower is waiting to grow';
+  const sub = stage === 6 ? 'You did everything today. Wonderful.' : `${done} of ${total} done today`;
+  // Play the bloom animation on the first view after blooming (and through any quick re-render).
+  const shown = local('bloomShown');
+  const justBloomed = stage === 6 && (!shown || shown.day !== dayKey() || Date.now() - shown.at < 8000);
+  if (stage === 6 && (!shown || shown.day !== dayKey())) local('bloomShown', { day: dayKey(), at: Date.now() });
+  const tag = link ? 'a' : 'div';
+  return `<${tag} class="paper garden-card${justBloomed ? ' just-bloomed' : ''}"${link ? ' href="#day"' : ''}>
+      <div class="garden-row">${plantSVG(stage)}
+        <div><div class="garden-title">${title}</div><div class="garden-sub">${sub}</div></div></div>
+      ${blooms.length ? `<div class="garden-strip" aria-label="${blooms.length} flowers in your garden">
+        ${blooms.slice(-14).map((b) => miniFlower(b.color || flowerColor(b.date))).join('')}
+        <span>${blooms.length === 1 ? '1 flower' : blooms.length + ' flowers'} in your garden</span></div>` : ''}
+    </${tag}>`;
+}
+
 function focusItem(items, doneMap, now = new Date()) {
   const hourAgo = now.getHours() === 0 ? '00:00' : nowHM(new Date(now.getTime() - 60 * 60 * 1000));
   return items.find((t) => !doneMap.has(t.key) && t.time >= hourAgo);
@@ -652,7 +704,7 @@ async function viewHome() {
          <span class="now-ic">${esc(focus.icon)}</span>
          <span class="now-body"><span class="kicker">${focus.time <= nowStr ? 'Right now' : 'Next · ' + fmtHM(focus.time)}</span>
          <span class="now-title">${esc(focus.title)}</span></span><span class="chev">›</span></a>`
-    : items.length
+    : open.length
       ? `<a class="now-card calm" href="#day"><span class="now-ic">${open.length ? '🍵' : '🌸'}</span>
            <span class="now-body"><span class="kicker">${open.length ? 'Nothing right now' : 'All done'}</span>
            <span class="now-title">${open.length ? 'Time to rest and relax' : 'You finished everything today'}</span></span></a>`
@@ -720,6 +772,8 @@ async function viewHome() {
 
     <button class="say-day" data-action="speak" data-purpose="day" data-text="${esc(sayDay)}">${icon('speak')} Read me the day</button>
 
+    ${await gardenHtml(items.length - open.length, items.length)}
+
     ${w ? `<div class="weather"><span class="w-ic">${wIcon}</span>
       <span><span class="w-temp">${w.temp}°</span> <span class="w-text">${esc(wText)}</span>
       <span class="w-tip">${esc(weatherAdvice(w))}</span></span>
@@ -783,9 +837,8 @@ async function viewDay() {
     <div class="focus calm"><div class="focus-ic">${open.length ? '🍵' : '🌸'}</div>
       <div class="focus-title">${open.length ? 'Nothing to do right now' : 'All done for today'}</div></div>`;
 
-  const pct = Math.round((done / items.length) * 100);
   return topbar('My Day') + `
-    <div class="progress"><div class="bar"><span style="width:${pct}%"></span></div><span>${done} of ${items.length} done</span></div>
+    ${await gardenHtml(done, items.length, false)}
     ${focusHtml}
     ${section('Later today', later, 'later')}
     ${section('Earlier — not checked off', earlier, 'earlier')}
@@ -1882,8 +1935,15 @@ document.addEventListener('click', async (e) => {
 
 async function completeItem(key) {
   await put('completions', { id: `${dayKey()}:${key}`, date: dayKey(), taskId: key, at: Date.now() });
-  toast('Well done ✓');
-  speak('Well done!');
+  const { items, doneMap } = await todayItems();
+  if (items.length && items.every((t) => doneMap.has(t.key)) && !(await get('garden', dayKey()))) {
+    await put('garden', { id: dayKey(), date: dayKey(), color: flowerColor(), at: Date.now() });
+    toast('Your flower bloomed! 🌸');
+    speak('You did everything today. Your flower has bloomed. Well done!');
+  } else {
+    toast('Well done ✓ Your flower grew a little');
+    speak('Well done! Your flower grew a little.');
+  }
   render();
 }
 
