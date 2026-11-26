@@ -422,3 +422,5 @@ textarea { min-height: 6rem; resize: vertical; }
 .pp-title { display: block; font-family: var(--serif); font-size: 1.3rem; font-weight: 700; }
 .pp-sub { display: block; color: var(--muted); font-size: .9rem; }
 .pair-prompt .kicker { color: var(--ai); }
+
+.no-code p { margin-bottom: .9rem; }

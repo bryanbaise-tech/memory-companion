@@ -1788,8 +1788,9 @@ function showWelcome() {
     <div class="paper stack-gap">
       <h2>Who is setting up this device?</h2>
       <button class="btn primary big wide" data-action="welcome-family">${icon('family')} I'm family or a caregiver</button>
+      <p class="hint">Start here. Sign in with your email and set up your loved one's companion.</p>
       <button class="btn big wide" data-action="welcome-device">${icon('about')} This phone is for my loved one</button>
-      <p class="hint">Family sign in with email. Your loved one's phone is paired once with a code — no password, ever.</p>
+      <p class="hint">Use this on their phone, after a family member has set things up and given you a 6-digit code.</p>
     </div>`;
 }
 function showEmail() {
@@ -1818,7 +1819,12 @@ function showPair() {
       <label>Name this device <span class="hint">(optional)</span><input type="text" name="device" maxlength="40" placeholder="e.g. Mom's iPad"></label>
       <button class="btn primary big" type="submit">Pair</button>
       <button class="btn ghost" type="button" data-action="welcome-back">‹ Back</button>
-    </form>`;
+    </form>
+    <div class="paper no-code">
+      <h2>Don't have a code yet?</h2>
+      <p>A family member sets things up first, on <b>their own</b> phone or computer. Then they get a code for this phone.</p>
+      <button class="btn big wide" data-action="welcome-family">${icon('family')} I'm the family member, set up first</button>
+    </div>`;
   $app.querySelector('[autofocus]')?.focus();
 }
 function showSetup() {
@@ -1849,7 +1855,7 @@ async function enterCircle() {
   const { data: rows, error } = await sb.from('members')
     .select('circle_id, role, display_name, created_at').eq('user_id', me.id).order('created_at');
   if (error) return showProblem(error.message);
-  if (!rows.length) return me.is_anonymous ? showPair() : showSetup();
+  if (!rows.length) return me.is_anonymous ? showWelcome() : showSetup();
   const saved = local('circle');
   const row = rows.find((r) => r.circle_id === saved) || rows[0];
   circleId = row.circle_id; myRole = row.role; myName = row.display_name || '';
