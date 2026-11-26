@@ -131,7 +131,10 @@ begin
   end if;
   insert into members (circle_id, user_id, role, display_name)
   values (r.circle_id, auth.uid(), r.role, coalesce(p_display, ''))
-  on conflict (circle_id, user_id) do update set role = excluded.role, display_name = excluded.display_name;
+  -- Never turn a family member into a device by accident.
+  on conflict (circle_id, user_id) do update
+    set role = case when members.role = 'family' then 'family' else excluded.role end,
+        display_name = case when members.role = 'family' then members.display_name else excluded.display_name end;
   delete from codes where code = r.code;
   return r.circle_id;
 end $$;

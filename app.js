@@ -991,28 +991,73 @@ async function careCircle() {
   const { data: members } = await sb.from('members').select('user_id, role, display_name, created_at').eq('circle_id', circleId).order('created_at');
   const fam = (members || []).filter((m) => m.role === 'family');
   const devices = (members || []).filter((m) => m.role === 'device');
-  const codeBox = (role) => lastCode && lastCode.role === role && lastCode.until > Date.now() ? `
-    <div class="code-box"><div class="kicker">Code · works for 24 hours</div><div class="code-big">${esc(lastCode.code.replace(/(\d{3})(\d{3})/, '$1 $2'))}</div></div>` : '';
   const appUrl = location.origin + location.pathname;
   const canInvite = myRole === 'family';
+  const who = settings.name || 'your loved one';
+  const whose = settings.name ? `${esc(settings.name)}'s` : 'their';
+  const live = (role) => lastCode && lastCode.role === role && lastCode.until > Date.now() ? lastCode.code : null;
+  const pretty = (k) => esc(k.replace(/(\d{3})(\d{3})/, '$1 $2'));
+  const sendButtons = (url, text, subject) => `
+    <div class="btn-row send-row">
+      ${navigator.share ? `<button class="btn primary" data-action="share-link" data-url="${esc(url)}" data-text="${esc(text)}">${icon('msg')} Send…</button>` : ''}
+      <a class="btn ${navigator.share ? '' : 'primary'}" href="sms:?&body=${encodeURIComponent(text + ' ' + url)}">${icon('msg')} Text message</a>
+      <a class="btn" href="mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(text + '\n\n' + url)}">Email</a>
+      <button class="btn" data-action="copy-link" data-url="${esc(url)}">Copy link</button>
+    </div>`;
+
+  const deviceCode = live('device');
+  const deviceCard = !canInvite
+    ? `<div class="paper"><h2>Set up ${whose} phone</h2><p class="hint">Only family members signed in with email can set up devices.</p></div>`
+    : !deviceCode ? `
+    <div class="paper">
+      <h2>Set up ${whose} phone or tablet</h2>
+      <p>Takes about a minute. Nobody types passwords or web addresses.</p>
+      <button class="btn primary big" data-action="make-code" data-id="device">Start</button>
+    </div>` : (() => {
+      const url = `${appUrl}?pair=${deviceCode}`;
+      return `
+    <div class="paper">
+      <h2>Set up ${whose} phone or tablet</h2>
+      <p class="hint">Pick whichever is easiest. This works once, for the next 24 hours.</p>
+      <div class="way">
+        <div class="way-title"><span class="way-num">1</span> Scan it with their phone</div>
+        <div class="qr" data-qr="${esc(url)}" aria-label="QR code to set up the phone"></div>
+        <p>Open the <b>Camera</b> on ${whose} phone, point it at this square, and tap the link that pops up. Then tap <b>Set up this phone</b>.</p>
+      </div>
+      <div class="way">
+        <div class="way-title"><span class="way-num">2</span> Or send them the link</div>
+        <p>Text or email it to ${whose} phone, then tap the link on that phone.</p>
+        ${sendButtons(url, `Tap this link on ${who}'s phone to set up Memory Companion:`, 'Set up Memory Companion')}
+      </div>
+      <div class="way">
+        <div class="way-title"><span class="way-num">3</span> Or type the code</div>
+        <div class="code-big">${pretty(deviceCode)}</div>
+        <p class="hint">On their phone, open the app and choose "This phone is for my loved one".</p>
+      </div>
+      <p class="hint">Once it opens on their phone, tap Share → <b>Add to Home Screen</b>, so next time it's one tap.</p>
+    </div>`;
+    })();
+
+  const famCode = live('family');
+  const familyCard = !canInvite ? '' : !famCode ? `
+    <div class="paper">
+      <h2>Invite a relative</h2>
+      <p class="hint">They'll be able to send messages and photos, and see what's done each day. Everyone signs in with their own email.</p>
+      <button class="btn" data-action="make-code" data-id="family">Invite someone</button>
+    </div>` : (() => {
+      const url = `${appUrl}?invite=${famCode}`;
+      return `
+    <div class="paper">
+      <h2>Invite a relative</h2>
+      <p>Send them this link. They tap it, sign in with their email, and they're in.</p>
+      ${sendButtons(url, `Join me in caring for ${who} on Memory Companion. Tap to join:`, `Help care for ${who} on Memory Companion`)}
+      <p class="hint">Works once, for 24 hours. Their invite code, if they need it: <b>${pretty(famCode)}</b></p>
+    </div>`;
+    })();
+
   return `
-    <div class="paper">
-      <h2>Pair ${esc(settings.name || 'your loved one')}'s phone or tablet</h2>
-      <ol class="steps">
-        <li>On their device, open <b>${esc(appUrl)}</b> in Safari or Chrome.</li>
-        <li>Tap <b>"This phone is for my loved one"</b>.</li>
-        <li>Type the 6-digit code below. That's it. They never need a password.</li>
-        <li>Optional: tap Share → <b>Add to Home Screen</b> so it opens like an app.</li>
-      </ol>
-      ${codeBox('device')}
-      ${canInvite ? `<button class="btn primary" data-action="make-code" data-id="device">Get a pairing code</button>` : '<p class="hint">Only family members signed in with email can pair devices.</p>'}
-    </div>
-    <div class="paper">
-      <h2>Invite family</h2>
-      <p class="hint">Each relative signs in with their own email, then enters this code to join. They can send messages and photos, and see what's done each day.</p>
-      ${codeBox('family')}
-      ${canInvite ? `<button class="btn" data-action="make-code" data-id="family">Get an invite code</button>` : ''}
-    </div>
+    ${deviceCard}
+    ${familyCard}
     <div class="paper">
       <h2>Who's in the circle</h2>
       ${fam.map((m) => `<div class="list-item"><span>👤 <strong>${esc(m.display_name || 'Family member')}</strong>${m.user_id === me.id ? ' <span class="meta">(you)</span>' : ''}<br><span class="meta">Family · joined ${new Date(m.created_at).toLocaleDateString()}</span></span>
@@ -1399,8 +1444,17 @@ async function render() {
   if (seq !== renderSeq) return;
   if (!html || !String(html).trim()) html = topbar('') + empty('day', 'This page is empty.');
   $app.innerHTML = html;
+  drawQRCodes();
   const auto = $app.querySelector('[autofocus]');
   if (auto) auto.focus();
+}
+
+function drawQRCodes() {
+  $app.querySelectorAll('[data-qr]').forEach((el) => {
+    if (!window.QRCode) { el.remove(); return; }
+    el.innerHTML = '';
+    new window.QRCode(el, { text: el.dataset.qr, width: 220, height: 220, colorDark: '#2b2925', colorLight: '#ffffff', correctLevel: window.QRCode.CorrectLevel.M });
+  });
 }
 
 window.addEventListener('hashchange', () => {
@@ -1504,6 +1558,13 @@ document.addEventListener('click', async (e) => {
         location.reload();
       }
       break;
+    case 'share-link':
+      try { await navigator.share({ title: 'Memory Companion', text: el.dataset.text, url: el.dataset.url }); } catch { /* cancelled */ }
+      break;
+    case 'copy-link':
+      try { await navigator.clipboard.writeText(el.dataset.url); toast('Link copied'); }
+      catch { window.prompt('Copy this link:', el.dataset.url); }
+      break;
     case 'welcome-family': showEmail(); break;
     case 'welcome-device': showPair(); break;
     case 'welcome-back': showWelcome(); break;
@@ -1580,6 +1641,7 @@ document.addEventListener('submit', async (e) => {
       case 'join-family': {
         const { error } = await sb.rpc('redeem_code', { p_code: val(fd, 'code'), p_display: val(fd, 'me') });
         if (error) { toast(error.message); break; }
+        local('invite', null);
         await enterCircle();
         break;
       }
@@ -1794,7 +1856,8 @@ function showWelcome() {
     </div>`;
 }
 function showEmail() {
-  $app.innerHTML = welcomeHero('Family sign in', 'We’ll email you a sign-in link.') + `
+  const invited = !!local('invite');
+  $app.innerHTML = welcomeHero(invited ? "You're invited" : 'Family sign in', invited ? 'Sign in with your email to join your family.' : 'We’ll email you a sign-in link.') + `
     <form class="paper stack" data-form="signin-email">
       <label>Your email <input type="email" name="email" required autocomplete="email" inputmode="email" autofocus></label>
       <button class="btn primary big" type="submit">Email me a sign-in link</button>
@@ -1811,23 +1874,35 @@ function showCheckEmail(email) {
       <button class="btn ghost" data-action="welcome-family">‹ Use a different email</button>
     </div>`;
 }
-function showPair() {
-  $app.innerHTML = welcomeHero('Pair this phone', 'Ask a family member for a 6-digit code.') + `
+function showPair(code = '') {
+  const ready = /^\d{6}$/.test(code);
+  $app.innerHTML = welcomeHero(ready ? 'Almost done' : 'Pair this phone', ready ? 'One tap and this phone is ready.' : 'Ask a family member for a 6-digit code.') + `
     <form class="paper stack" data-form="pair-code">
-      <p>A family member gets the code in <b>Family tools → Family &amp; devices → Get a pairing code</b>.</p>
-      <label>Pairing code <input type="text" name="code" required inputmode="numeric" autocomplete="one-time-code" maxlength="7" class="code-input" placeholder="123 456" autofocus></label>
-      <label>Name this device <span class="hint">(optional)</span><input type="text" name="device" maxlength="40" placeholder="e.g. Mom's iPad"></label>
-      <button class="btn primary big" type="submit">Pair</button>
-      <button class="btn ghost" type="button" data-action="welcome-back">‹ Back</button>
+      ${ready ? `<p class="ready-text">Your family has set up a companion for you. Tap the button below.</p>
+        <input type="hidden" name="code" value="${esc(code)}">`
+      : `<p>A family member gets the code in <b>Family tools → Family &amp; devices</b>.</p>
+        <label>Pairing code <input type="text" name="code" required inputmode="numeric" autocomplete="one-time-code" maxlength="7" class="code-input" placeholder="123 456" autofocus></label>
+        <label>Name this device <span class="hint">(optional)</span><input type="text" name="device" maxlength="40" placeholder="e.g. Mom's iPad"></label>`}
+      <button class="btn primary big" type="submit">${ready ? 'Set up this phone' : 'Pair'}</button>
+      ${ready ? '' : `<button class="btn ghost" type="button" data-action="welcome-back">‹ Back</button>`}
     </form>
+    ${ready ? '' : `
     <div class="paper no-code">
       <h2>Don't have a code yet?</h2>
-      <p>A family member sets things up first, on <b>their own</b> phone or computer. Then they get a code for this phone.</p>
+      <p>A family member sets things up first, on <b>their own</b> phone or computer. Then they send a link or show a QR code for this phone.</p>
       <button class="btn big wide" data-action="welcome-family">${icon('family')} I'm the family member, set up first</button>
-    </div>`;
+    </div>`}`;
   $app.querySelector('[autofocus]')?.focus();
 }
+function showFamilyHasLink() {
+  $app.innerHTML = welcomeHero('This link is for their phone', `You're signed in as family here.`) + `
+    <div class="paper">
+      <p>That setup link should be opened on <b>your loved one's</b> phone, not this one. Scan the QR code with their phone's camera, or send the link to them.</p>
+      <button class="btn primary big wide" onclick="location.reload()">Go to Family tools</button>
+    </div>`;
+}
 function showSetup() {
+  if (local('invite')) return showJoin();
   $app.innerHTML = welcomeHero("Let's set things up", `Signed in as ${me.email || ''}`) + `
     <form class="paper stack" data-form="setup-circle">
       <h2>Who are you caring for?</h2>
@@ -1842,10 +1917,10 @@ function showSetup() {
 function showJoin() {
   $app.innerHTML = welcomeHero('Join your family', `Signed in as ${me.email || ''}`) + `
     <form class="paper stack" data-form="join-family">
-      <label>Invite code <input type="text" name="code" required inputmode="numeric" maxlength="7" class="code-input" placeholder="123 456" autofocus></label>
-      <label>Your name, as they know you <input type="text" name="me" required maxlength="40" placeholder="e.g. Tom (your son)"></label>
+      <label>Invite code <input type="text" name="code" required inputmode="numeric" maxlength="7" class="code-input" placeholder="123 456" value="${esc(local('invite') || '')}" ${local('invite') ? '' : 'autofocus'}></label>
+      <label>Your name, as they know you <input type="text" name="me" required maxlength="40" placeholder="e.g. Tom (your son)" ${local('invite') ? 'autofocus' : ''}></label>
       <button class="btn primary big" type="submit">Join</button>
-      <button class="btn ghost" type="button" onclick="location.reload()">‹ Back</button>
+      <button class="btn ghost" type="button" onclick="localStorage.removeItem('invite');location.reload()">‹ Back</button>
     </form>`;
   $app.querySelector('[autofocus]')?.focus();
 }
@@ -1902,9 +1977,20 @@ function startTimers() {
     showWelcome();
     return toast(hashParams.get('error_description').replace(/\+/g, ' '));
   }
+  const q = new URLSearchParams(location.search);
+  const pairCode = (q.get('pair') || '').replace(/\D/g, '');
+  const inviteCode = (q.get('invite') || '').replace(/\D/g, '');
+  if (inviteCode) local('invite', inviteCode);
+  if (pairCode || inviteCode) history.replaceState(null, '', location.pathname + location.hash);
+
   const { data: { session: s } } = await sb.auth.getSession();
   if (location.hash.includes('access_token') || location.hash.includes('type=')) history.replaceState(null, '', location.pathname);
-  if (!s) return showWelcome();
+  if (!s) return pairCode ? showPair(pairCode) : inviteCode ? showEmail() : showWelcome();
   me = s.user;
+  if (pairCode) {
+    if (!me.is_anonymous) return showFamilyHasLink();
+    const { count } = await sb.from('members').select('user_id', { count: 'exact', head: true }).eq('user_id', me.id);
+    if (!count) return showPair(pairCode);
+  }
   try { await enterCircle(); } catch (err) { console.error(err); showProblem(`Couldn't load: ${err.message}`); }
 })();
