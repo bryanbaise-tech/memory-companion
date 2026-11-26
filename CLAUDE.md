@@ -52,7 +52,7 @@ xcodebuild -project MemoryCompanion.xcodeproj -scheme MemoryCompanion -configura
 DEV=$(xcrun simctl list devices available | grep "iPhone 18 Pro (" | head -1 | grep -oE '[0-9A-F-]{36}')
 xcrun simctl boot $DEV 2>/dev/null; xcrun simctl bootstatus $DEV -b >/dev/null
 xcrun simctl install $DEV build/Build/Products/Debug-iphonesimulator/MemoryCompanion.app
-xcrun simctl launch $DEV com.memorycompanion.app
+xcrun simctl launch $DEV com.bryanbaisetech.memorycompanion
 sleep 8 && xcrun simctl io $DEV screenshot /tmp/mc-sim.png   # then view the PNG
 ```
 
@@ -63,7 +63,7 @@ Debug-only test hooks (compiled out of Release):
   `window.webkit.messageHandlers.mc.postMessage({type:"debugDump"})`).
 - `-mcSkipNotificationPrompt` schedules without asking. The Simulator cannot tap "Allow", so
   iOS refuses to store them; `debugDump` writes `Documents/pending.json` in the app container
-  (`xcrun simctl get_app_container $DEV com.memorycompanion.app data`) with what the app
+  (`xcrun simctl get_app_container $DEV com.bryanbaisetech.memorycompanion data`) with what the app
   received, what got scheduled, and iOS's errors.
 
 To run on a real iPhone: open `ios/MemoryCompanion.xcodeproj` in Xcode, choose your Apple ID
