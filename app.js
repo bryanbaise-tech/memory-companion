@@ -427,17 +427,37 @@ async function mediaUrl(id) {
   return data.signedUrl;
 }
 function forgetUrl(id) { urlCache.delete(id); }
-async function saveMedia(file, caption = '', hidden = false) {
+async function saveMedia(file, caption = '', hidden = false, from = shortName(myName)) {
   const id = uid();
   const ext = String(file.name || '').split('.').pop().toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 5);
   const path = `${circleId}/${id}${ext ? '.' + ext : ''}`;
   toast('Uploading…');
   const { error } = await sb.storage.from('media').upload(path, file, { contentType: file.type || undefined, upsert: false });
   if (error) throw new Error(/exceed|too large|size/i.test(error.message) ? 'That file is too big (50 MB max).' : error.message);
-  await put('media', { id, path, type: file.type || '', caption, hidden, at: Date.now() });
+  await put('media', { id, path, type: file.type || '', caption, hidden, from: shortName(from), at: Date.now() });
   return id;
 }
 const isVideo = (m) => (m.type || '').startsWith('video/');
+// "Sarah (your daughter)" -> "Sarah"
+const shortName = (s) => String(s || '').split(' (')[0].trim();
+// Find the sender's face in Family (People) so the loved one recognizes who sent it.
+async function faceFor(from) {
+  const n = shortName(from).toLowerCase();
+  if (!n) return '';
+  const first = n.split(/\s+/)[0];
+  const p = (await all('people')).find((x) => {
+    const pn = String(x.name || '').toLowerCase();
+    return pn === n || pn.split(/[\s(]/)[0] === first;
+  });
+  return p && p.photoId ? await mediaUrl(p.photoId) : '';
+}
+const joinNames = (names) => names.length <= 1 ? (names[0] || '') : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+// Photos added since this device last opened Photos.
+function photosSeen() {
+  let seen = local('photosSeen');
+  if (typeof seen !== 'number') { seen = Date.now(); local('photosSeen', seen); }
+  return seen;
+}
 const isAudio = (m) => (m.type || '').startsWith('audio/');
 async function galleryItems() {
   return (await all('media')).filter((m) => !m.hidden && !isAudio(m)).sort((a, b) => b.at - a.at);
@@ -605,6 +625,10 @@ async function viewHome() {
     .sort((a, b) => (a.date + (a.time || '')).localeCompare(b.date + (b.time || '')))
     .slice(0, 2);
   const photos = gallery.filter((m) => !isVideo(m));
+  const seen = photosSeen();
+  const fresh = gallery.filter((m) => m.at > seen);
+  const freshFrom = [...new Set(fresh.map((m) => shortName(m.from)).filter(Boolean))];
+  const freshWho = freshFrom.length ? joinNames(freshFrom) : 'your family';
   const memory = photos.length ? photos[Math.floor(now.getTime() / 86400000) % photos.length] : null;
   const w = weather && weather.lat === settings.lat && settings.lat != null ? weather : null;
   const [, wIcon, wText] = w ? weatherInfo(w.code) : [];
@@ -619,6 +643,7 @@ async function viewHome() {
           : (items.length && !open.length ? 'You have done everything for today. Well done.' : ''),
     upcoming[0] ? `${upcoming[0].date === today ? 'Later today' : fmtDay(upcoming[0].date).split(' · ')[0]}, you have ${upcoming[0].title}${upcoming[0].time ? ' at ' + fmtHM(upcoming[0].time) : ''}.` : '',
     unread ? `You have ${unread === 1 ? 'a new message' : unread + ' new messages'} from your family.` : '',
+    fresh.length ? `${freshFrom.length ? freshWho : 'Your family'} sent you ${fresh.length === 1 ? 'a new photo' : fresh.length + ' new photos'}.` : '',
     'Have a lovely day.',
   ].filter(Boolean).join(' ');
 
@@ -638,6 +663,17 @@ async function viewHome() {
       <div class="section-label">A memory for today</div>
       <img src="${await mediaUrl(memory.id)}" alt="${esc(memory.caption)}">
       ${memory.caption ? `<div class="memory-cap">${esc(memory.caption)}</div>` : ''}
+    </a>` : '';
+
+  const freshHtml = fresh.length ? `
+    <a class="paper new-photos" href="#photos">
+      <div class="section-label">${fresh.length === 1 ? 'A new photo' : fresh.length + ' new photos'}</div>
+      <div class="from-row">${freshFrom.length === 1 ? avatar(await faceFor(freshFrom[0]), freshFrom[0]).replace('class="avatar"', 'class="avatar sm"') : `<span class="latest-ic">${icon('photo')}</span>`}
+        <div class="from-name">From ${esc(freshWho)}</div></div>
+      <div class="np-strip">${(await Promise.all(fresh.slice(0, 3).map(async (m) => {
+        const url = await mediaUrl(m.id);
+        return isVideo(m) ? `<video src="${url}#t=0.5" muted playsinline preload="metadata"></video>` : `<img src="${url}" alt="">`;
+      }))).join('')}</div>
     </a>` : '';
 
   const latestHtml = latest ? `
@@ -690,7 +726,7 @@ async function viewHome() {
     <nav class="tiles" aria-label="Main menu">
       ${tile('#day', 'day', 'My Day', `${items.length - open.length} of ${items.length} done`, 't-ai')}
       ${tile('#messages', 'msg', 'Messages', unread ? `${unread} new` : 'From family', 't-shu', unread)}
-      ${tile('#photos', 'photo', 'Photos', '&amp; videos', 't-kin')}
+      ${tile('#photos', 'photo', 'Photos', fresh.length ? `${fresh.length} new` : '&amp; videos', 't-kin', fresh.length)}
       ${tile('#people', 'family', 'Family', 'Call or see', 't-fuji')}
       ${tile('#meds', 'med', 'Medicines', 'What to take', 't-matcha')}
       ${tile('#calendar', 'cal', 'Calendar', upcoming[0] ? esc(fmtDay(upcoming[0].date).split(' · ')[0]) : 'Appointments', 't-sora')}
@@ -700,6 +736,7 @@ async function viewHome() {
 
     <a class="help-btn" href="#help">${icon('phone')} I need help</a>
 
+    ${freshHtml}
     ${upcomingHtml}
     ${latestHtml}
     ${memoryHtml}
@@ -805,12 +842,15 @@ async function viewMessage(id) {
 async function viewPhotos() {
   const items = await galleryItems();
   if (!items.length) return topbar('Photos') + empty('photo', 'No photos yet.', 'Your family can add photos and videos in Family settings.');
+  const seen = photosSeen();
+  local('photosSeen', Date.now());
   const cards = await Promise.all(items.map(async (m) => {
     const url = await mediaUrl(m.id);
     return `<a class="thumb" href="#photo/${m.id}"><div class="frame">${isVideo(m)
       ? `<video src="${url}#t=0.5" muted playsinline preload="metadata"></video><span class="play">${icon('play')}</span>`
       : `<img src="${url}" alt="${esc(m.caption)}" loading="lazy">`}</div>
-      <div class="cap">${esc(m.caption || ' ')}</div></a>`;
+      ${m.at > seen ? '<span class="new-pill on-photo">New</span>' : ''}
+      <div class="cap">${esc(m.caption || ' ')}${m.from ? `<span class="cap-from">From ${esc(shortName(m.from))}</span>` : ''}</div></a>`;
   }));
   return topbar('Photos') + `<div class="gallery">${cards.join('')}</div>`;
 }
@@ -827,9 +867,11 @@ async function viewPhoto(id) {
       <div class="frame">${isVideo(m)
         ? `<video src="${url}" controls playsinline autoplay></video>`
         : `<img src="${url}" alt="${esc(m.caption)}">`}</div>
+      ${m.from ? `<div class="from-row">${avatar(await faceFor(m.from), m.from).replace('class="avatar"', 'class="avatar sm"')}
+        <div><div class="from-name">From ${esc(shortName(m.from))}</div><div class="msg-when">${fmtWhen(m.at)}</div></div></div>` : ''}
       ${m.caption ? `<div class="caption">${esc(m.caption)}</div>` : ''}
-      <div class="msg-when">Added ${fmtWhen(m.at)}</div>
-      ${m.caption ? `<div class="btn-row">${speakBtn(m.caption)}</div>` : ''}
+      ${m.from ? '' : `<div class="msg-when">Added ${fmtWhen(m.at)}</div>`}
+      ${m.caption || m.from ? `<div class="btn-row">${speakBtn([m.from ? `${shortName(m.from)} sent you this.` : '', m.caption].filter(Boolean).join(' '))}</div>` : ''}
       <div class="nav">
         ${prev ? `<a class="btn big" href="#photo/${prev.id}">‹ Newer</a>` : '<span></span>'}
         ${next ? `<a class="btn big" href="#photo/${next.id}">Older ›</a>` : '<span></span>'}
@@ -1432,6 +1474,7 @@ async function carePhotos() {
     const url = await mediaUrl(m.id);
     return `<div class="list-item">
       ${isVideo(m) ? `<video class="mini-thumb" src="${url}#t=0.5" muted preload="metadata"></video>` : `<img class="mini-thumb" src="${url}" alt="">`}
+      ${m.from ? `<span class="hint" style="flex:none">from ${esc(shortName(m.from))}</span>` : ''}
       <form class="row" data-form="caption-save" data-id="${m.id}" style="flex:1">
         <input type="text" name="caption" value="${esc(m.caption)}" placeholder="Add a caption" maxlength="120">
         <button class="btn small" type="submit" style="flex:none">Save</button>
@@ -1442,6 +1485,8 @@ async function carePhotos() {
     <form class="paper stack" data-form="photo-add">
       <h2>Add photos &amp; videos</h2>
       <label>Choose files <input type="file" name="files" accept="image/*,video/*" multiple required></label>
+      <label>From <span class="hint">(shown on each photo so they know who sent it)</span>
+        <input type="text" name="from" maxlength="40" value="${esc(shortName(myName))}" placeholder="e.g. Sarah"></label>
       <label>Caption <span class="hint">(who, where, when — this is read aloud)</span>
         <input type="text" name="caption" maxlength="120" placeholder="e.g. Emma's graduation, May 2025"></label>
       <button class="btn primary" type="submit">Add to Photos</button>
@@ -1928,14 +1973,14 @@ document.addEventListener('submit', async (e) => {
         break;
       case 'msg-add': {
         const file = fd.get('file');
-        const mediaId = file && file.size ? await saveMedia(file, `From ${val(fd, 'from')}`) : null;
+        const mediaId = file && file.size ? await saveMedia(file, val(fd, 'text').slice(0, 120), false, val(fd, 'from')) : null;
         await put('messages', { id: uid(), from: val(fd, 'from'), text: val(fd, 'text'), mediaId, voiceId: String(fd.get('voiceId') || ''), at: Date.now(), read: false, replies: [] });
         toast('Message sent'); render();
         break;
       }
       case 'photo-add': {
         const files = fd.getAll('files').filter((f) => f.size);
-        for (const f of files) await saveMedia(f, val(fd, 'caption'));
+        for (const f of files) await saveMedia(f, val(fd, 'caption'), false, val(fd, 'from'));
         toast(`Added ${files.length} item${files.length === 1 ? '' : 's'}`); render();
         break;
       }
