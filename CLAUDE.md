@@ -26,6 +26,8 @@ native iPhone/iPad shell in `ios/`.
 - After changing `app.js` or `styles.css`, bump the `?v=` numbers in `index.html` so phones get
   the new files. Check `app.js` parses before pushing:
   `osascript -l JavaScript -e 'function run(){var s=$.NSString.stringWithContentsOfFileEncodingError("app.js",4,null).js;new Function(s);return "ok"}'`
+- Top-level code in `app.js` runs before later `let`/`const` exist: never call, at load time, a
+  function that reads state declared further down (this once stopped the whole app in the iPhone shell).
 - Security conventions (from three outside reviews; keep them):
   - Every stored string that reaches markup goes through `esc()`; every stored link through
     `safeUrl()` (with a host list for embeds, thumbnails and previews); colors through `safeColor()`.
@@ -57,8 +59,12 @@ sleep 8 && xcrun simctl io $DEV screenshot /tmp/mc-sim.png   # then view the PNG
 ```
 
 Debug-only test hooks (compiled out of Release):
-- `-mcOpenURL memorycompanion://pair?token=<32 hex>` opens a link at launch (avoids the
-  "Open in Companion?" prompt that `simctl openurl` shows).
+- `-mcOpenURL memorycompanion://pair?token=<32 hex>` opens a link 6 s after launch, once the page
+  is up, like tapping a link while the app is open (avoids the "Open in Companion?" prompt that
+  `simctl openurl` shows). Also works with a real sign-in link (`memorycompanion://auth#access_token=…`).
+- Debug builds print page errors, CSP blocks, startup and what each tap hits to the console as
+  `[web] …` / `[native] …` (`xcrun simctl launch --console-pty …`, or the Xcode console), and the
+  web view is inspectable from Safari → Develop.
 - `-mcEval "<js>"` runs JavaScript after every page load (e.g. click a button, then
   `window.webkit.messageHandlers.mc.postMessage({type:"debugDump"})`).
 - `-mcSkipNotificationPrompt` schedules without asking. The Simulator cannot tap "Allow", so

@@ -32,7 +32,12 @@ final class Router: ObservableObject {
         var target = URLComponents(url: Router.home, resolvingAgainstBaseURL: false)!
         switch url.host {
         case "auth":
-            target.fragment = url.fragment
+            // Must be a fresh page load: supabase-js reads the #access_token only when the page
+            // starts. Loading the open page with just a new #fragment is an in-page jump (only a
+            // hashchange), so the sign-in would be silently ignored. A unique query forces a reload.
+            guard let fragment = url.fragment, !fragment.isEmpty else { return }
+            target.queryItems = [URLQueryItem(name: "signin", value: String(Int(Date().timeIntervalSince1970)))]
+            target.fragment = fragment
         case "pair", "invite":
             let token = URLComponents(url: url, resolvingAgainstBaseURL: false)?
                 .queryItems?.first(where: { $0.name == "token" })?.value ?? ""

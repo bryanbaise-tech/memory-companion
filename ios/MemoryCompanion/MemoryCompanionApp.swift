@@ -30,10 +30,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         // Voices and music play even when the ring/silent switch is on silent.
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
         #if DEBUG
-        // Test hook (Debug builds only): `-mcOpenURL memorycompanion://…` opens a link at launch.
+        // Test hook (Debug builds only): `-mcOpenURL memorycompanion://…` opens a link a few seconds
+        // after launch, once the page is up (like tapping a link while the app is already open).
         let args = ProcessInfo.processInfo.arguments
         if let i = args.firstIndex(of: "-mcOpenURL"), i + 1 < args.count, let url = URL(string: args[i + 1]) {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { Router.shared.open(url) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6) { Router.shared.open(url) }
         }
         #endif
         return true

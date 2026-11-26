@@ -14,6 +14,9 @@ struct CompanionWebView: UIViewRepresentable {
         config.websiteDataStore = .default()                       // keep sign-in and settings between launches
         let controller = WKUserContentController()
         controller.add(context.coordinator, name: "mc")
+        #if DEBUG
+        controller.addUserScript(WKUserScript(source: Coordinator.diagnostics, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        #endif
         config.userContentController = controller
 
         let web = WKWebView(frame: .zero, configuration: config)
@@ -24,6 +27,9 @@ struct CompanionWebView: UIViewRepresentable {
         web.backgroundColor = UIColor(red: 0.984, green: 0.949, blue: 0.914, alpha: 1)
         web.scrollView.contentInsetAdjustmentBehavior = .never
         context.coordinator.web = web
+        #if DEBUG
+        if #available(iOS 16.4, *) { web.isInspectable = true }   // Safari → Develop → this iPhone
+        #endif
         web.load(Router.request(Router.home))
         return web
     }
@@ -57,6 +63,8 @@ struct CompanionWebView: UIViewRepresentable {
             #if DEBUG
             case "debugDump":
                 Reminders.debugDump()
+            case "log":
+                print("[web]", body["level"] as? String ?? "log", body["text"] as? String ?? "")
             #endif
             default:
                 break
@@ -72,6 +80,9 @@ struct CompanionWebView: UIViewRepresentable {
                 return decisionHandler(.allow) // embedded players, generated audio, QR images
             }
             if url.scheme == "https" && inside { return decisionHandler(.allow) }
+            if url.isFileURL && url.standardizedFileURL.path.hasPrefix(Bundle.main.bundleURL.standardizedFileURL.path) {
+                return decisionHandler(.allow) // the bundled "no internet" page
+            }
             if ["tel", "sms", "mailto", "facetime", "facetime-audio", "https", "spotify", "music"].contains(url.scheme ?? "") {
                 UIApplication.shared.open(url)
             }
@@ -133,7 +144,16 @@ struct CompanionWebView: UIViewRepresentable {
             showOffline(webView, error)
         }
         private func showOffline(_ webView: WKWebView, _ error: Error) {
-            if (error as NSError).code == NSURLErrorCancelled { return }
+            #if DEBUG
+            print("[native] load failed:", (error as NSError).domain, (error as NSError).code, error.localizedDescription)
+            #endif
+            // Only real connection problems. Other failures (a cancelled load, a link handed to
+            // another app, WebKit's "frame load interrupted") must not replace the page.
+            let e = error as NSError
+            let offline: Set<Int> = [NSURLErrorNotConnectedToInternet, NSURLErrorTimedOut, NSURLErrorCannotFindHost,
+                                     NSURLErrorCannotConnectToHost, NSURLErrorNetworkConnectionLost, NSURLErrorDNSLookupFailed,
+                                     NSURLErrorInternationalRoamingOff, NSURLErrorDataNotAllowed]
+            guard e.domain == NSURLErrorDomain, offline.contains(e.code) else { return }
             guard let page = Bundle.main.url(forResource: "offline", withExtension: "html") else { return }
             webView.loadFileURL(page, allowingReadAccessTo: page.deletingLastPathComponent())
         }
@@ -144,8 +164,31 @@ struct CompanionWebView: UIViewRepresentable {
         }
 
         #if DEBUG
+        // Diagnostics (Debug builds only): page errors, startup and taps show in the Xcode console.
+        static let diagnostics = """
+        (function(){
+          var send = function(level, parts){ try { window.webkit.messageHandlers.mc.postMessage({type:'log', level:level,
+            text: Array.prototype.map.call(parts, function(p){ try { return typeof p === 'string' ? p : (p && p.stack) || JSON.stringify(p); } catch(e) { return String(p); } }).join(' ').slice(0, 2000)}); } catch(e) {} };
+          ['error','warn'].forEach(function(l){ var o = console[l]; console[l] = function(){ send(l, arguments); return o.apply(console, arguments); }; });
+          window.addEventListener('error', function(e){ send('error', [(e.message || 'resource failed: ' + ((e.target && (e.target.src || e.target.href)) || '?')) + (e.filename ? ' @ ' + e.filename + ':' + e.lineno : '')]); }, true);
+          window.addEventListener('unhandledrejection', function(e){ send('error', ['unhandled promise: ', e.reason]); });
+          document.addEventListener('securitypolicyviolation', function(e){ send('error', ['CSP blocked ' + e.blockedURI + ' (' + e.violatedDirective + ')']); });
+          document.addEventListener('DOMContentLoaded', function(){ send('info', ['DOMContentLoaded, supabase loaded: ' + !!window.supabase]); });
+          window.addEventListener('load', function(){ setTimeout(function(){ var a = document.getElementById('app') || document.body;
+            send('info', ['load done; screen text: ' + ((a && a.innerText) || '').replace(/\\s+/g, ' ').slice(0, 160)]); }, 1500); });
+          document.addEventListener('pointerdown', function(e){ var t = document.elementFromPoint(e.clientX, e.clientY);
+            var d = function(n){ return n ? n.tagName.toLowerCase() + (n.id ? '#' + n.id : '') + (n.className && typeof n.className === 'string' ? '.' + n.className.trim().split(/\\s+/).join('.') : '') : 'none'; };
+            send('info', ['tap at ' + Math.round(e.clientX) + ',' + Math.round(e.clientY) + ' hits ' + d(t) + ' inside ' + d(t && t.closest('[data-action],button,a,input,label'))]); }, true);
+        })();
+        """
+
+        func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+            print("[native] loading", webView.url?.absoluteString ?? "")
+        }
+
         // Test hook (Debug builds only): `-mcEval "<js>"` runs after each page load.
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            print("[native] finished loading", webView.url?.absoluteString ?? "")
             let args = ProcessInfo.processInfo.arguments
             guard let i = args.firstIndex(of: "-mcEval"), i + 1 < args.count else { return }
             webView.evaluateJavaScript(args[i + 1], completionHandler: nil)
