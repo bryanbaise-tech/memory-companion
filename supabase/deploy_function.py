@@ -5,7 +5,7 @@ from mgmt import REF, TOKEN
 name = sys.argv[1]
 src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "functions", name, "index.ts"), "rb").read()
 b = "----mc" + uuid.uuid4().hex
-meta = json.dumps({"entrypoint_path": "index.ts", "name": name, "verify_jwt": False}).encode()
+meta = json.dumps({"entrypoint_path": "index.ts", "name": name, "verify_jwt": True}).encode()
 body = (f'--{b}\r\nContent-Disposition: form-data; name="metadata"\r\nContent-Type: application/json\r\n\r\n').encode() + meta + b"\r\n" + \
        (f'--{b}\r\nContent-Disposition: form-data; name="file"; filename="index.ts"\r\nContent-Type: application/typescript\r\n\r\n').encode() + src + b"\r\n" + \
        f"--{b}--\r\n".encode()

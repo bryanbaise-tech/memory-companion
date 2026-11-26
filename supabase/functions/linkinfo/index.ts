@@ -38,19 +38,19 @@ Deno.serve(async (req) => {
 
   try {
     if (/youtu/.test(url.hostname)) {
-      const r = await fetch(`https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(url.href)}`);
+      const r = await fetch(`https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(url.href)}`, { redirect: "manual", signal: AbortSignal.timeout(8000) });
       if (!r.ok) return json({ error: "Couldn't find that YouTube video (is it private?)" }, 404);
       const d = await r.json();
       return json({ title: d.title || "", artist: d.author_name || "", thumb: d.thumbnail_url || "" });
     }
     if (/spotify/.test(url.hostname)) {
-      const r = await fetch(`https://open.spotify.com/oembed?url=${encodeURIComponent(url.href)}`);
+      const r = await fetch(`https://open.spotify.com/oembed?url=${encodeURIComponent(url.href)}`, { redirect: "manual", signal: AbortSignal.timeout(8000) });
       if (!r.ok) return json({ error: "Couldn't find that on Spotify" }, 404);
       const d = await r.json();
       return json({ title: d.title || "", artist: "", thumb: d.thumbnail_url || "" });
     }
     // Apple Music has no public lookup, so read the page's title and cover picture.
-    const r = await fetch(url.href, { headers: { "User-Agent": "Mozilla/5.0 (compatible; MemoryCompanion/1.0)" } });
+    const r = await fetch(url.href, { headers: { "User-Agent": "Mozilla/5.0 (compatible; MemoryCompanion/1.0)" }, redirect: "manual", signal: AbortSignal.timeout(8000) });
     if (!r.ok) return json({ error: "Couldn't find that on Apple Music" }, 404);
     const html = (await r.text()).slice(0, 400000);
     const title = meta(html, "apple:title");
@@ -59,6 +59,7 @@ Deno.serve(async (req) => {
     const artist = (meta(html, "og:title").match(/ by (.+?) on Apple\s*Music$/i) || [])[1] || "";
     return json({ title, artist: artist.trim(), thumb: meta(html, "og:image") });
   } catch (err) {
-    return json({ error: `Lookup failed: ${(err as Error).message}` }, 502);
+    console.error("linkinfo", err);
+    return json({ error: "Couldn't look that link up just now. Please try again." }, 502);
   }
 });

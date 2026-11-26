@@ -43,12 +43,15 @@ async function put(s, obj) {
   if (error) throw new Error(error.message);
   return rec.id;
 }
+// Deleting writes a tombstone instead of removing the row: the server never broadcasts
+// real deletes (they would skip row-level security), and purges tombstones after 30 days.
+const isTomb = (d) => !!(d && d.deleted);
 async function del(s, id) {
   const rec = storeOf(s).get(id);
   storeOf(s).delete(id);
-  const { error } = await sb.from('items').delete().match({ circle_id: circleId, store: s, id });
+  const { error } = await sb.from('items').upsert({ circle_id: circleId, store: s, id, data: { id, deleted: true, at: Date.now() }, updated_at: new Date().toISOString() });
   if (error) throw new Error(error.message);
-  if (s === 'media' && rec && rec.path) sb.storage.from('media').remove([rec.path]).catch(() => {});
+  if (s === 'media' && rec && rec.path && myRole === 'family') sb.storage.from('media').remove([rec.path]).catch(() => {});
 }
 
 async function loadCircle() {
@@ -56,7 +59,7 @@ async function loadCircle() {
   for (let from = 0; ; from += 1000) {
     const { data, error } = await sb.from('items').select('store,id,data').eq('circle_id', circleId).range(from, from + 999);
     if (error) throw new Error(error.message);
-    for (const row of data) storeOf(row.store).set(row.id, row.data);
+    for (const row of data) if (!isTomb(row.data)) storeOf(row.store).set(row.id, row.data);
     if (data.length < 1000) break;
   }
 }
@@ -66,22 +69,16 @@ let liveChannel = null;
 function listenLive() {
   if (liveChannel) sb.removeChannel(liveChannel);
   const apply = (p) => {
-    if (p.eventType === 'DELETE') {
-      const o = p.old || {};
-      if (o.circle_id && o.circle_id !== circleId) return;
-      if (o.store) storeOf(o.store).delete(o.id);
-    } else {
-      const n = p.new;
-      if (!n || n.circle_id !== circleId) return;
-      storeOf(n.store).set(n.id, n.data);
-      if (n.store === 'settings' && n.id === 'main') { settings = mergeSettings(n.data); applySettings(); }
-    }
+    const n = p.new;
+    if (!n || n.circle_id !== circleId) return;
+    if (isTomb(n.data)) storeOf(n.store).delete(n.id);
+    else storeOf(n.store).set(n.id, n.data);
+    if (n.store === 'settings' && n.id === 'main' && !isTomb(n.data)) { settings = mergeSettings(n.data); applySettings(); }
     softRender();
   };
   liveChannel = sb.channel('circle-' + circleId)
     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'items', filter: `circle_id=eq.${circleId}` }, apply)
     .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'items', filter: `circle_id=eq.${circleId}` }, apply)
-    .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'items' }, apply)
     .subscribe();
 }
 
@@ -113,6 +110,19 @@ const $toast = document.getElementById('toast');
 
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// Any member can write any row, so every link from stored data is checked before it reaches
+// src/href: https only, and optionally only on known hosts. Anything else becomes ''.
+function safeUrl(u, hosts = null) {
+  try {
+    const x = new URL(String(u || ''));
+    if (x.protocol !== 'https:') return '';
+    if (hosts && !hosts.some((h) => x.hostname === h || x.hostname.endsWith('.' + h))) return '';
+    return x.href;
+  } catch { return ''; }
+}
+const EMBED_HOSTS = ['www.youtube-nocookie.com', 'open.spotify.com', 'embed.music.apple.com'];
+const OPEN_HOSTS = ['youtube.com', 'youtu.be', 'open.spotify.com', 'music.apple.com'];
+const safeColor = (c, fallback = '#e48aa0') => (/^#[0-9a-f]{3,8}$/i.test(String(c || '')) ? c : fallback);
 const pad = (n) => String(n).padStart(2, '0');
 const dayKey = (d = new Date()) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const nowHM = (d = new Date()) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
@@ -422,9 +432,10 @@ async function mediaUrl(id) {
   if (hit && hit.until > Date.now()) return hit.url;
   const m = storeOf('media').get(id);
   if (!m || !m.path) return '';
-  const { data, error } = await sb.storage.from('media').createSignedUrl(m.path, 6 * 3600);
+  // Signed links can't be revoked, so keep them short: 1 hour, reused for 50 minutes.
+  const { data, error } = await sb.storage.from('media').createSignedUrl(m.path, 3600);
   if (error) { console.warn(error); return ''; }
-  urlCache.set(id, { url: data.signedUrl, until: Date.now() + 5 * 3600 * 1000 });
+  urlCache.set(id, { url: data.signedUrl, until: Date.now() + 50 * 60 * 1000 });
   return data.signedUrl;
 }
 function forgetUrl(id) { urlCache.delete(id); }
@@ -549,6 +560,7 @@ function growthStage(done, total) {
   return Math.min(5, Math.ceil((done / total) * 5)); // first task always shows a sprout
 }
 function plantSVG(stage, color = flowerColor()) {
+  color = safeColor(color);
   const h = [4, 16, 28, 40, 50, 56, 58][stage];
   const top = 90 - h;
   const leaf = (y, a, sc = 1) => `<path class="leaf" d="M0 0 C6 -7 17 -7 22 0 C17 7 6 7 0 0Z" transform="translate(50 ${y}) rotate(${a}) scale(${sc})"/>`;
@@ -568,7 +580,7 @@ function plantSVG(stage, color = flowerColor()) {
     <path d="M22 92 H78 L72 120 H28 Z" fill="#d98a64"/><rect x="19" y="88" width="62" height="9" rx="4" fill="#c9774f"/>
   </svg>`;
 }
-const miniFlower = (color) => `<svg class="mini-flower" viewBox="0 0 24 24" aria-hidden="true">${[0, 72, 144, 216, 288].map((a) => `<ellipse cx="12" cy="6.5" rx="3.6" ry="5.5" fill="${color}" transform="rotate(${a} 12 12)"/>`).join('')}<circle cx="12" cy="12" r="3.2" fill="#f6d36b"/></svg>`;
+const miniFlower = (c) => { const color = safeColor(c); return `<svg class="mini-flower" viewBox="0 0 24 24" aria-hidden="true">${[0, 72, 144, 216, 288].map((a) => `<ellipse cx="12" cy="6.5" rx="3.6" ry="5.5" fill="${color}" transform="rotate(${a} 12 12)"/>`).join('')}<circle cx="12" cy="12" r="3.2" fill="#f6d36b"/></svg>`; };
 async function gardenHtml(done, total, link = true) {
   if (!total) return '';
   const stage = growthStage(done, total);
@@ -726,7 +738,7 @@ async function viewHome() {
       : (heroPic.caption && from ? `From ${from}` : 'A memory for today');
     heroHtml = `
       ${isVideo(heroPic) ? `<video class="hero-img" src="${url}#t=0.5" muted playsinline preload="metadata"></video>` : `<img class="hero-img" src="${url}" alt="">`}
-      <a class="hero-from" href="${fresh.length ? '#photos' : '#photo/' + heroPic.id}">${face}
+      <a class="hero-from" href="${fresh.length ? '#photos' : '#photo/' + esc(heroPic.id)}">${face}
         <span><span class="hf-title">${esc(title)}</span><span class="hf-sub">${esc(sub)}</span></span>
         ${fresh.length ? `<span class="new-pill">New</span>` : ''}</a>`;
   }
@@ -739,7 +751,7 @@ async function viewHome() {
     </nav>` : '';
 
   const latestHtml = latest ? `
-    <a class="paper latest ${latest.read ? '' : 'unread'}" href="#message/${latest.id}">
+    <a class="paper latest ${latest.read ? '' : 'unread'}" href="#message/${esc(latest.id)}">
       <div class="section-label">${latest.read ? 'Latest message' : 'New message'}</div>
       <div class="latest-row">
         ${latest.mediaId ? `<img class="latest-thumb" src="${await mediaUrl(latest.mediaId)}" alt="">` : `<span class="latest-ic">${icon('msg')}</span>`}
@@ -852,7 +864,7 @@ async function viewMessages() {
   const msgs = (await all('messages')).sort((a, b) => b.at - a.at);
   if (!msgs.length) return topbar('Messages') + empty('msg', 'No messages yet.');
   const rows = await Promise.all(msgs.map(async (m) => `
-    <a class="paper msg ${m.read ? '' : 'unread'}" href="#message/${m.id}">
+    <a class="paper msg ${m.read ? '' : 'unread'}" href="#message/${esc(m.id)}">
       ${m.mediaId ? `<img class="latest-thumb" src="${await mediaUrl(m.mediaId)}" alt="">` : `<span class="latest-ic">${icon('msg')}</span>`}
       <span class="msg-body">
         <span class="msg-from">${esc(m.from)}${m.read ? '' : '<span class="new-pill">New</span>'}</span>
@@ -892,7 +904,7 @@ async function viewMessage(id) {
       <div class="section-label">Send a reply</div>
       ${replyBar('messages', m)}
       <div class="reply-grid">${QUICK_REPLIES.filter((r) => !r.startsWith('I love')).map((r) =>
-        `<button class="btn big" data-action="reply" data-id="${m.id}" data-text="${esc(r)}">${esc(r)}</button>`).join('')}</div>
+        `<button class="btn big" data-action="reply" data-id="${esc(m.id)}" data-text="${esc(r)}">${esc(r)}</button>`).join('')}</div>
     </div>`;
 }
 
@@ -904,7 +916,7 @@ async function viewPhotos() {
   if (myRole === 'device') await Promise.all(items.filter((m) => !m.seenAt).map((m) => markSeen('media', m)));
   const cards = await Promise.all(items.map(async (m) => {
     const url = await mediaUrl(m.id);
-    return `<a class="thumb" href="#photo/${m.id}"><div class="frame">${isVideo(m)
+    return `<a class="thumb" href="#photo/${esc(m.id)}"><div class="frame">${isVideo(m)
       ? `<video src="${url}#t=0.5" muted playsinline preload="metadata"></video><span class="play">${icon('play')}</span>`
       : `<img src="${url}" alt="${esc(m.caption)}" loading="lazy">`}</div>
       ${m.at > seen ? '<span class="new-pill on-photo">New</span>' : ''}
@@ -934,8 +946,8 @@ async function viewPhoto(id) {
       ${m.caption || m.from ? `<div class="btn-row">${speakBtn([m.from ? `${shortName(m.from)} sent you this.` : '', m.caption].filter(Boolean).join(' '))}</div>` : ''}
       ${m.from ? replyBar('media', m) : ''}
       <div class="nav">
-        ${prev ? `<a class="btn big" href="#photo/${prev.id}">‹ Newer</a>` : '<span></span>'}
-        ${next ? `<a class="btn big" href="#photo/${next.id}">Older ›</a>` : '<span></span>'}
+        ${prev ? `<a class="btn big" href="#photo/${esc(prev.id)}">‹ Newer</a>` : '<span></span>'}
+        ${next ? `<a class="btn big" href="#photo/${esc(next.id)}">Older ›</a>` : '<span></span>'}
       </div>
     </div>`;
 }
@@ -964,8 +976,8 @@ function replyBar(store, item) {
     : r.kind === 'voice' ? '🎤 You sent a voice message' : `You replied: <strong>${esc(r.text)}</strong>`} · ${fmtWhen(r.at)}</div>`).join('');
   return `<div class="reply-box">
       <div class="reply-bar">
-        <button class="btn big heart${loved ? ' on' : ''}" data-action="heart" data-store="${store}" data-id="${item.id}"${loved ? ' disabled' : ''}>${loved ? '❤️ You loved this' : '❤️ Love it'}</button>
-        <button class="btn big" data-action="vnote" data-store="${store}" data-id="${item.id}">🎤 Say something</button>
+        <button class="btn big heart${loved ? ' on' : ''}" data-action="heart" data-store="${esc(store)}" data-id="${esc(item.id)}"${loved ? ' disabled' : ''}>${loved ? '❤️ You loved this' : '❤️ Love it'}</button>
+        <button class="btn big" data-action="vnote" data-store="${esc(store)}" data-id="${esc(item.id)}">🎤 Say something</button>
       </div>
       <p class="hint reply-to">${esc(to)} will see it.</p>
       ${sent}
@@ -1155,11 +1167,11 @@ async function viewMusic(id) {
   const list = await songs();
   if (!list.length && !links.length) return topbar('Music') + empty('music', 'No songs yet.', 'Your family can add favorite songs in Family settings.');
   const linkCards = links.map((m) => `
-    <a class="paper song-link" href="#music/${m.id}">
-      <span class="cover">${m.thumb ? `<img src="${esc(m.thumb)}" alt="" loading="lazy">` : icon('music')}</span>
+    <a class="paper song-link" href="#music/${esc(m.id)}">
+      <span class="cover">${safeUrl(m.thumb) ? `<img src="${esc(safeUrl(m.thumb))}" alt="" loading="lazy">` : icon('music')}</span>
       <span class="song-body"><span class="song-title">${esc(m.title || 'Song')}</span>
         ${m.artist ? `<span class="song-artist">${esc(m.artist)}</span>` : ''}
-        <span class="svc svc-${m.provider}">${SERVICE[m.provider] || ''}</span></span>
+        ${SERVICE[m.provider] ? `<span class="svc svc-${esc(m.provider)}">${SERVICE[m.provider]}</span>` : ''}</span>
       <span class="play-pill">${icon('play')} Play</span>
     </a>`).join('');
   return topbar('Music') + linkCards + list.map((s) => {
@@ -1167,14 +1179,17 @@ async function viewMusic(id) {
     return `<div class="paper song">
       <span class="song-ic">${icon('music')}</span>
       <span class="song-title">${esc(s.caption || 'Song')}</span>
-      <button class="btn primary big song-btn" data-action="song" data-id="${s.id}">${playing ? `${icon('pause')} Pause` : `${icon('play')} Play`}</button>
+      <button class="btn primary big song-btn" data-action="song" data-id="${esc(s.id)}">${playing ? `${icon('pause')} Pause` : `${icon('play')} Play`}</button>
     </div>`;
   }).join('');
 }
 
 function viewMusicPlayer(m) {
   if (!m) return topbar('Music', '#music', 'Music') + empty('music', 'That song is no longer here.');
-  const p = parseMusicLink(m.url) || m;
+  const p = parseMusicLink(m.url);
+  const embed = p && safeUrl(p.embed, EMBED_HOSTS);
+  if (!p || !embed) return topbar('', '#music', 'All music') + empty('music', "This song's link can't be played.", 'A family member can remove it and add it again.');
+  const open = safeUrl(p.open, OPEN_HOSTS);
   const height = p.provider === 'youtube' ? null : p.provider === 'spotify' ? (p.tall ? 452 : 352) : (p.tall ? 450 : 175);
   const appName = SERVICE[p.provider];
   return topbar('', '#music', 'All music') + `
@@ -1182,12 +1197,12 @@ function viewMusicPlayer(m) {
       <h1 class="player-title">${esc(m.title || 'Song')}</h1>
       ${m.artist ? `<div class="song-artist big">${esc(m.artist)}</div>` : ''}
       <div class="embed ${p.provider === 'youtube' ? 'embed-video' : ''}" ${height ? `style="height:${height}px"` : ''}>
-        <iframe src="${esc(p.embed)}" title="${esc(m.title || 'Music player')}" loading="eager"
+        <iframe src="${esc(embed)}" title="${esc(m.title || 'Music player')}" loading="eager"
           allow="autoplay; encrypted-media; clipboard-write; fullscreen; picture-in-picture" allowfullscreen></iframe>
       </div>
       <p class="player-hint">${p.provider === 'youtube' ? 'Tap the picture to play.' : `Tap play for a short preview, or play the whole song in the ${appName} app.`}</p>
       <div class="btn-row">
-        ${p.provider !== 'youtube' ? `<a class="btn primary big" href="${esc(p.open)}" target="_blank" rel="noopener">${icon('play')} Play full song in ${appName}</a>` : ''}
+        ${p.provider !== 'youtube' && open ? `<a class="btn primary big" href="${esc(open)}" target="_blank" rel="noopener">${icon('play')} Play full song in ${appName}</a>` : ''}
         ${speakBtn(`${m.title || 'This song'}${m.artist ? ', by ' + m.artist : ''}.`, 'What song is this?')}
       </div>
     </div>`;
@@ -1276,7 +1291,9 @@ async function careCircle() {
   const who = settings.name || 'your loved one';
   const whose = settings.name ? `${esc(settings.name)}'s` : 'their';
   const live = (role) => lastCode && lastCode.role === role && lastCode.until > Date.now() ? lastCode.code : null;
-  const pretty = (k) => esc(k.replace(/(\d{3})(\d{3})/, '$1 $2'));
+  const pretty = (k) => esc(String(k).replace(/^(\d{4})(\d{4})$/, '$1 $2'));
+  const typedUntil = lastCode ? new Date(lastCode.made + 30 * 60 * 1000) : null;
+  const typedLive = typedUntil && typedUntil > Date.now();
   const sendButtons = (url, text, subject) => `
     <div class="btn-row send-row">
       ${navigator.share ? `<button class="btn primary" data-action="share-link" data-url="${esc(url)}" data-text="${esc(text)}">${icon('msg')} Send…</button>` : ''}
@@ -1298,7 +1315,7 @@ async function careCircle() {
       return `
     <div class="paper">
       <h2>Set up ${whose} phone or tablet</h2>
-      <p class="hint">Pick whichever is easiest. This works once, for the next 24 hours.</p>
+      <p class="hint">Pick whichever is easiest. The QR code and link work once, for 24 hours.</p>
       <div class="way">
         <div class="way-title"><span class="way-num">1</span> Scan it with their phone</div>
         <div class="qr" data-qr="${esc(url)}" aria-label="QR code to set up the phone"></div>
@@ -1311,8 +1328,9 @@ async function careCircle() {
       </div>
       <div class="way">
         <div class="way-title"><span class="way-num">3</span> Or type the code</div>
-        <div class="code-big">${pretty(deviceCode)}</div>
-        <p class="hint">On their phone, open the app and choose "This phone is for my loved one".</p>
+        ${typedLive ? `<div class="code-big">${pretty(deviceCode)}</div>
+        <p class="hint">On their phone, open the app and choose "This phone is for my loved one". For safety, a typed code only works for 30 minutes (until ${esc(fmtClock(typedUntil))}).</p>`
+        : `<p class="hint">For safety, typed codes only work for 30 minutes, and this one has expired. Use the QR code or link above, or <button class="btn small" data-action="make-code" data-id="device">get a new code</button>.</p>`}
       </div>
       <p class="hint">Once it opens on their phone, tap Share → <b>Add to Home Screen</b>, so next time it's one tap.</p>
     </div>`;
@@ -1331,7 +1349,7 @@ async function careCircle() {
       <h2>Invite a relative</h2>
       <p>Send them this link. They tap it, sign in with their email, and they're in.</p>
       ${sendButtons(url, `Join me in caring for ${who} on Memory Companion. Tap to join:`, `Help care for ${who} on Memory Companion`)}
-      <p class="hint">Works once, for 24 hours. Their invite code, if they need it: <b>${pretty(famCode)}</b></p>
+      <p class="hint">The link works once, for 24 hours.${typedLive ? ` If they need to type a code instead: <b>${pretty(famCode)}</b> (works until ${esc(fmtClock(typedUntil))}).` : ''}</p>
     </div>`;
     })();
 
@@ -1500,7 +1518,7 @@ async function careActivity() {
         <a class="pair-prompt" href="#care/circle">
           <span class="pp-ic">${icon('phone')}</span>
           <span><span class="kicker">Next step</span><span class="pp-title">Pair ${esc(settings.name || 'their')}${settings.name ? "'s" : ''} phone</span>
-          <span class="pp-sub">Get a 6-digit code to set up their device — no password needed.</span></span>
+          <span class="pp-sub">Scan a QR code or send a link to set up their device. No password needed.</span></span>
           <span class="chev">›</span>
         </a>`;
     }
@@ -1585,7 +1603,7 @@ async function careTasks() {
     <div class="paper"><h2>Daily schedule</h2>
       ${tasks.length ? tasks.map((t) => `
         <div class="list-item"><span>${esc(t.icon)} <strong>${fmtHM(t.time)}</strong> — ${esc(t.title)}</span>
-        <button class="btn small danger" data-action="task-del" data-id="${t.id}">Remove</button></div>`).join('')
+        <button class="btn small danger" data-action="task-del" data-id="${esc(t.id)}">Remove</button></div>`).join('')
         : '<p class="hint">No tasks yet.</p>'}
     </div>`;
 }
@@ -1611,7 +1629,7 @@ async function careMeds() {
     <div class="paper"><h2>Medicines</h2>
       ${meds.length ? meds.map((m) => `
         <div class="list-item"><span><strong>${esc(m.name)}</strong> ${esc(m.dose)}<br><span class="meta">${(m.times || []).map(fmtHM).join(', ')} · ${esc(m.purpose)}</span></span>
-        <button class="btn small danger" data-action="med-del" data-id="${m.id}">Remove</button></div>`).join('')
+        <button class="btn small danger" data-action="med-del" data-id="${esc(m.id)}">Remove</button></div>`).join('')
         : '<p class="hint">No medicines yet.</p>'}
     </div>`;
 }
@@ -1635,7 +1653,7 @@ async function careCalendar() {
     <div class="paper"><h2>Calendar</h2>
       ${events.length ? events.map((e) => `
         <div class="list-item"><span><strong>${esc(e.title)}</strong><br><span class="meta">${esc(fmtDay(e.date))}${e.time ? ' · ' + fmtHM(e.time) : ''}${e.place ? ' · ' + esc(e.place) : ''}</span></span>
-        <button class="btn small danger" data-action="event-del" data-id="${e.id}">Remove</button></div>`).join('')
+        <button class="btn small danger" data-action="event-del" data-id="${esc(e.id)}">Remove</button></div>`).join('')
         : '<p class="hint">Nothing scheduled.</p>'}
     </div>`;
 }
@@ -1659,7 +1677,7 @@ async function careMessages() {
       ${msgs.length ? msgs.map((m) => `
         <div class="list-item"><span><strong>${esc(m.from)}</strong>: ${esc(m.text.slice(0, 60))}${m.text.length > 60 ? '…' : ''}
           <br><span class="meta">${fmtWhen(m.at)} · ${m.read ? `Read ✓${m.readAt ? ' ' + fmtWhen(m.readAt) : ''}` : 'Not read yet'}${(m.replies || []).some((r) => r.kind === 'heart') ? ' · ❤️' : ''}${(m.replies || []).length ? ` · ${m.replies.length} repl${m.replies.length > 1 ? 'ies' : 'y'}` : ''}</span></span>
-        <button class="btn small danger" data-action="msg-del" data-id="${m.id}">Delete</button></div>`).join('')
+        <button class="btn small danger" data-action="msg-del" data-id="${esc(m.id)}">Delete</button></div>`).join('')
         : '<p class="hint">No messages yet.</p>'}
     </div>`;
 }
@@ -1671,11 +1689,11 @@ async function carePhotos() {
     return `<div class="list-item">
       ${isVideo(m) ? `<video class="mini-thumb" src="${url}#t=0.5" muted preload="metadata"></video>` : `<img class="mini-thumb" src="${url}" alt="">`}
       <span class="hint" style="flex:none">${m.from ? `from ${esc(shortName(m.from))}<br>` : ''}${m.seenAt ? 'Seen ✓' : 'Not seen yet'}${(m.replies || []).some((r) => r.kind === 'heart') ? ' · ❤️' : ''}</span>
-      <form class="row" data-form="caption-save" data-id="${m.id}" style="flex:1">
+      <form class="row" data-form="caption-save" data-id="${esc(m.id)}" style="flex:1">
         <input type="text" name="caption" value="${esc(m.caption)}" placeholder="Add a caption" maxlength="120">
         <button class="btn small" type="submit" style="flex:none">Save</button>
       </form>
-      <button class="btn small danger" data-action="media-del" data-id="${m.id}">Delete</button></div>`;
+      <button class="btn small danger" data-action="media-del" data-id="${esc(m.id)}">Delete</button></div>`;
   }));
   return `
     <form class="paper stack" data-form="photo-add">
@@ -1710,9 +1728,9 @@ async function careMusic() {
     </form>
     ${links.length ? `<div class="paper"><h2>Music links (${links.length})</h2>
       ${links.map((m) => `<div class="list-item">
-        ${m.thumb ? `<img class="mini-thumb" src="${esc(m.thumb)}" alt="">` : ''}
+        ${safeUrl(m.thumb) ? `<img class="mini-thumb" src="${esc(safeUrl(m.thumb))}" alt="">` : ''}
         <span style="flex:1;min-width:0"><strong>${esc(m.title || 'Song')}</strong><br><span class="meta">${SERVICE[m.provider] || ''}${m.artist ? ' · ' + esc(m.artist) : ''}</span></span>
-        <button class="btn small danger" data-action="music-del" data-id="${m.id}">Remove</button></div>`).join('')}
+        <button class="btn small danger" data-action="music-del" data-id="${esc(m.id)}">Remove</button></div>`).join('')}
     </div>` : ''}
     <form class="paper stack" data-form="song-add">
       <h2>Or upload song files</h2>
@@ -1722,11 +1740,11 @@ async function careMusic() {
     </form>
     <div class="paper"><h2>Songs (${list.length})</h2>
       ${list.map((s) => `<div class="list-item">
-        <form class="row" data-form="caption-save" data-id="${s.id}" style="flex:1">
+        <form class="row" data-form="caption-save" data-id="${esc(s.id)}" style="flex:1">
           <input type="text" name="caption" value="${esc(s.caption)}" maxlength="120">
           <button class="btn small" type="submit" style="flex:none">Save</button>
         </form>
-        <button class="btn small danger" data-action="media-del" data-id="${s.id}">Delete</button></div>`).join('') || '<p class="hint">No songs yet.</p>'}
+        <button class="btn small danger" data-action="media-del" data-id="${esc(s.id)}">Delete</button></div>`).join('') || '<p class="hint">No songs yet.</p>'}
     </div>`;
 }
 
@@ -1746,7 +1764,7 @@ async function carePeople() {
     <div class="paper"><h2>People</h2>
       ${people.length ? people.map((p) => `
         <div class="list-item"><span><strong>${esc(p.name)}</strong> — ${esc(p.relation)}<br><span class="meta">${esc(p.phone) || 'no phone'}</span></span>
-        <button class="btn small danger" data-action="person-del" data-id="${p.id}">Remove</button></div>`).join('')
+        <button class="btn small danger" data-action="person-del" data-id="${esc(p.id)}">Remove</button></div>`).join('')
         : '<p class="hint">No people yet.</p>'}
     </div>`;
 }
@@ -1769,7 +1787,7 @@ async function careAbout() {
       <h2 style="margin-top:.6rem">Help button</h2>
       <label>Who to call first <select name="helpPersonId">
         <option value="">First person with a phone number</option>
-        ${people.map((p) => `<option value="${p.id}" ${p.id === settings.helpPersonId ? 'selected' : ''}>${esc(p.name)}${telOf(p) ? '' : ' (no phone)'}</option>`).join('')}
+        ${people.map((p) => `<option value="${esc(p.id)}" ${p.id === settings.helpPersonId ? 'selected' : ''}>${esc(p.name)}${telOf(p) ? '' : ' (no phone)'}</option>`).join('')}
       </select></label>
       <h2 style="margin-top:.6rem">Weather</h2>
       <div class="row">
@@ -1848,7 +1866,7 @@ function careVoice() {
   const list = goodVoices();
   const natural = list.filter((v) => voiceQuality(v) >= 2);
   const rates = [[0.75, 'Very slow'], [0.85, 'Slow and gentle'], [0.95, 'Normal']];
-  const label = (v) => `${v.name.replace(/\s*\(.*?\)\s*/g, ' ').trim()}${voiceQuality(v) >= 2 ? ' ★ natural' : ''} — ${v.lang}`;
+  const label = (v) => esc(`${v.name.replace(/\s*\(.*?\)\s*/g, ' ').trim()}${voiceQuality(v) >= 2 ? ' ★ natural' : ''} — ${v.lang}`);
   return `
     <form class="paper stack" data-form="voice-save">
       <h2>${eleven.enabled ? 'Backup voice (built into this device)' : 'Voice'}</h2>
@@ -2042,10 +2060,14 @@ document.addEventListener('click', async (e) => {
       if (confirm(`Permanently delete ${settings.name || 'this'} care circle — all tasks, medicines, messages, photos, music and people — for everyone?`)
           && confirm('Are you sure? This cannot be undone.')) {
         try {
-          const paths = (await all('media')).map((m) => m.path).filter(Boolean);
-          for (let i = 0; i < paths.length; i += 100) await sb.storage.from('media').remove(paths.slice(i, i + 100));
-          const { error } = await sb.from('circles').delete().eq('id', circleId);
-          if (error) throw error;
+          // The server deletes every file, the family's cloned voices, then the circle.
+          toast('Deleting everything…');
+          const r = await fetch(`${SUPABASE_URL}/functions/v1/deletecircle`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
+            body: JSON.stringify({ circleId }),
+          });
+          const out = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(out.error || 'Please try again.');
           local('circle', null);
           location.hash = '';
           location.reload();
@@ -2055,7 +2077,7 @@ document.addEventListener('click', async (e) => {
     case 'make-code': {
       const { data, error } = await sb.rpc('make_code', { p_circle: circleId, p_role: id });
       if (error) { toast(error.message); break; }
-      lastCode = { code: data, role: id, until: Date.now() + 24 * 3600 * 1000 };
+      lastCode = { code: data, role: id, made: Date.now(), until: Date.now() + 24 * 3600 * 1000 };
       render();
       break;
     }
@@ -2434,7 +2456,7 @@ function showWelcome() {
       <button class="btn primary big wide" data-action="welcome-family">${icon('family')} I'm family or a caregiver</button>
       <p class="hint">Start here. Sign in with your email and set up your loved one's companion.</p>
       <button class="btn big wide" data-action="welcome-device">${icon('about')} This phone is for my loved one</button>
-      <p class="hint">Use this on their phone, after a family member has set things up and given you a 6-digit code.</p>
+      <p class="hint">Use this on their phone, after a family member has set things up and given you a QR code, link or 8-digit code.</p>
     </div>`;
 }
 function showEmail() {
@@ -2459,13 +2481,13 @@ function showCheckEmail(email) {
 // The circle id that pairing/invite links carry (a UUID), or null.
 const linkCircle = (v) => (/^[0-9a-f-]{36}$/i.test(String(v || '')) ? String(v) : null);
 function showPair(code = '', circle = null) {
-  const ready = /^\d{6}$/.test(code);
-  $app.innerHTML = welcomeHero(ready ? 'Almost done' : 'Pair this phone', ready ? 'One tap and this phone is ready.' : 'Ask a family member for a 6-digit code.') + `
+  const ready = /^\d{8}$/.test(code);
+  $app.innerHTML = welcomeHero(ready ? 'Almost done' : 'Pair this phone', ready ? 'One tap and this phone is ready.' : 'Ask a family member for the QR code or link, or an 8-digit code.') + `
     <form class="paper stack" data-form="pair-code">
       ${ready ? `<p class="ready-text">Your family has set up a companion for you. Tap the button below.</p>
         <input type="hidden" name="code" value="${esc(code)}">${circle ? `<input type="hidden" name="circle" value="${esc(circle)}">` : ''}`
       : `<p>A family member gets the code in <b>Family tools → Family &amp; devices</b>.</p>
-        <label>Pairing code <input type="text" name="code" required inputmode="numeric" autocomplete="one-time-code" maxlength="7" class="code-input" placeholder="123 456" autofocus></label>
+        <label>Pairing code <input type="text" name="code" required inputmode="numeric" autocomplete="one-time-code" maxlength="9" class="code-input" placeholder="1234 5678" autofocus></label>
         <label>Name this device <span class="hint">(optional)</span><input type="text" name="device" maxlength="40" placeholder="e.g. Mom's iPad"></label>`}
       <button class="btn primary big" type="submit">${ready ? 'Set up this phone' : 'Pair'}</button>
       ${ready ? '' : `<button class="btn ghost" type="button" data-action="welcome-back">‹ Back</button>`}
@@ -2501,7 +2523,7 @@ function showSetup() {
 function showJoin() {
   $app.innerHTML = welcomeHero('Join your family', `Signed in as ${me.email || ''}`) + `
     <form class="paper stack" data-form="join-family">
-      <label>Invite code <input type="text" name="code" required inputmode="numeric" maxlength="7" class="code-input" placeholder="123 456" value="${esc(local('invite') || '')}" ${local('invite') ? '' : 'autofocus'}></label>
+      <label>Invite code <input type="text" name="code" required inputmode="numeric" maxlength="9" class="code-input" placeholder="1234 5678" value="${esc(local('invite') || '')}" ${local('invite') ? '' : 'autofocus'}></label>
       <label>Your name, as they know you <input type="text" name="me" required maxlength="40" placeholder="e.g. Tom (your son)" ${local('invite') ? 'autofocus' : ''}></label>
       <button class="btn primary big" type="submit">Join</button>
       <button class="btn ghost" type="button" onclick="localStorage.removeItem('invite');location.reload()">‹ Back</button>

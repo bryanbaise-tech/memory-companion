@@ -24,7 +24,7 @@ family mode for the people who care for them.
   security means only circle members can read or change anything. Schema:
   [`supabase/schema.sql`](supabase/schema.sql).
 - **Sign-in:** family by email link; the loved one's device signs in anonymously and joins a
-  circle with a one-time 6-digit code (codes expire in 24 h; guessing is rate-limited).
+  circle with a one-time QR code or link (24 h), or an 8-digit code typed within 30 minutes; guessing is rate-limited per account and per circle.
 - **Live updates:** messages and check-offs appear on every device instantly (Supabase Realtime).
 - **Warm voice:** the [`speak`](supabase/functions/speak/index.ts) edge function calls ElevenLabs
   ("Brady J – Friendly, Casual, Warm"). The ElevenLabs key is a server secret, only circle
@@ -65,3 +65,22 @@ picture-frame mode (photos, garden, night clock).
      Decided: use this rule. Deleting a circle must also delete media/<circle_id>/*
      in storage on the server side (today only the app's reset button does it).
 4. **App Store** release, which needs the Apple Developer Program ($99 a year).
+
+### Security follow-ups (from the second outside review)
+
+Done: per-circle voices (server-only table), strict sample paths, no DELETE broadcasts
+(tombstones instead), safe links/colors and escaped ids, SRI on CDN scripts, 8-digit codes
+with per-account and per-circle guess limits, family-only hard deletes and storage deletes,
+media types restricted, daily warm-voice allowance, voice and sample-size caps, server-side
+circle deletion (files + cloned voices), 1-hour signed links, JWT-verified functions,
+last-family-member guard, nightly cleanup of tombstones and unpaired anonymous accounts.
+
+Still to do:
+- Turn on CAPTCHA (Cloudflare Turnstile) for anonymous sign-ins in the Supabase dashboard,
+  then pass the token from the pairing screen.
+- Server-verified family PIN (hash in a no-grant table, rate-limited unlock that opens a
+  30-minute window for device writes to family data). Today the PIN is a screen lock only.
+- Expire old cached voice clips in the private "voice" bucket.
+- Optional: store replies and "seen" marks as their own rows stamped by the server, if they
+  ever need to be proof rather than a friendly signal.
+
