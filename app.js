@@ -27,6 +27,8 @@ function showProblem(text) {
   const safe = String(text).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   el.innerHTML = `<div class="paper problem"><h2>One moment</h2><p>${safe}</p>
     <button class="btn primary" data-action="reload">Try again</button></div>`;
+  // Works even if the script stopped before the page-wide button handler was set up.
+  el.querySelector('button').addEventListener('click', (e) => { e.stopPropagation(); location.reload(); });
 }
 window.addEventListener('error', (e) => {
   console.error(e.error || e.message);
@@ -388,7 +390,9 @@ function pickVoice() {
   if (route() === 'care' && location.hash.includes('settings') && $app.querySelector('#voice-pick')) render();
 }
 if ('speechSynthesis' in window) {
-  pickVoice();
+  // Not right away: pickVoice reads `settings`, which is declared further down this file. When the
+  // phone already has its voices loaded, an immediate call stopped the whole script (no buttons worked).
+  setTimeout(pickVoice, 0);
   speechSynthesis.addEventListener?.('voiceschanged', pickVoice);
 }
 
